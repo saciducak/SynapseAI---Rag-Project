@@ -1,0 +1,149 @@
+"""
+LLM Service - Ollama Local LLM Wrapper
+Handles all LLM interactions with Ollama for free local inference
+"""
+import requests
+import json
+from typing import Optional
+from loguru import logger
+
+from app.core.config import get_settings
+from app.core.exceptions import LLMError
+
+
+settings = get_settings()
+
+
+class LLMService:
+    """
+    Ollama LLM service wrapper.
+    Uses sync requests for reliable Ollama API calls.
+    """
+    
+    def __init__(self):
+        self.settings = get_settings()
+        self.base_url = "http://localhost:11434"
+        self.default_model = "llama3.2"
+        logger.info(f"LLMService initialized with base_url={self.base_url}, model={self.default_model}")
+    
+    async def chat(
+        self,
+        messages: list[dict],
+        model: Optional[str] = None,
+        temperature: float = 0.7,
+        max_tokens: int = 2000,
+        response_format: Optional[dict] = None
+    ) -> tuple[str, int]:
+        """
+        Send a chat completion request to Ollama.
+        """
+        try:
+            # Convert messages to single prompt
+            prompt_parts = []
+            for msg in messages:
+                role = msg.get("role", "user")
+                content = msg.get("content", "")
+                if role == "system":
+                    prompt_parts.append(f"System: {content}\n\n")
+                elif role == "user":
+                    prompt_parts.append(f"User: {content}\n\n")
+                elif role == "assistant":
+                    prompt_parts.append(f"Assistant: {content}\n\n")
+            
+            prompt_parts.append("Assistant: ")
+            full_prompt = "".join(prompt_parts)
+            
+            # Build payload
+            payload = {
+                "model": model or self.default_model,
+                "prompt": full_prompt[:500],  # Truncate for faster response during testing
+                "stream": False,
+                "options": {
+                    "temperature": temperature,
+                    "num_predict": min(max_tokens, 500)  # Limit for faster testing
+                }
+            }
+            
+            # Add JSON format if requested
+            if response_format and response_format.get("type") == "json_object":
+                payload["format"] = "json"
+            
+            url = f"{self.base_url}/api/generate"
+            logger.info(f"🔥 CALLING OLLAMA: {url}")
+            logger.info(f"🔥 MODEL: {payload['model']}")
+            logger.info(f"🔥 PROMPT LENGTH: {len(full_prompt)} chars")
+            
+            # Make sync request
+            response = requests.post(
+                url,
+                json=payload,
+                headers={"Content-Type": "application/json"},
+                timeout=120
+            )
+            
+            logger.info(f"🔥 RESPONSE STATUS: {response.status_code}")
+            
+            if response.status_code != 200:
+                logger.error(f"🔥 RESPONSE TEXT: {response.text[:500]}")
+            
+            response.raise_for_status()
+            
+            result = response.json()
+            content = result.get("response", "")
+            tokens = result.get("eval_count", len(content.split()) * 2)
+            
+            logger.info(f"✅ Ollama success: ~{tokens} tokens")
+            return content, tokens
+            
+        except requests.exceptions.ConnectionError as e:
+            logger.error(f"❌ Connection error: {e}")
+            raise LLMError("Ollama not running. Please start Ollama first.")
+        except requests.exceptions.HTTPError as e:
+            logger.error(f"❌ HTTP error: {e}")
+            logger.error(f"❌ Response: {e.response.text if e.response else 'No response'}")
+            raise LLMError(f"LLM call failed: {str(e)}")
+        except Exception as e:
+            logger.error(f"❌ Unexpected error: {type(e).__name__}: {e}")
+            raise LLMError(f"LLM call failed: {str(e)}")
+    
+    async def chat_json(
+        self,
+        messages: list[dict],
+        model: Optional[str] = None,
+        temperature: float = 0.3,
+        max_tokens: int = 2000
+    ) -> tuple[str, int]:
+        """Chat with JSON response format."""
+        return await self.chat(
+            messages=messages,
+            model=model,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            response_format={"type": "json_object"}
+        )
+    
+    async def simple_prompt(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        model: Optional[str] = None,
+        temperature: float = 0.7
+    ) -> tuple[str, int]:
+        """Simple prompt with system and user messages."""
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt}
+        ]
+        return await self.chat(messages, model=model, temperature=temperature)
+
+
+# Singleton
+_llm_service: Optional[LLMService] = None
+
+
+def get_llm_service() -> LLMService:
+    """Get or create LLM service instance."""
+    global _llm_service
+    if _llm_service is None:
+        _llm_service = LLMService()
+    return _llm_service

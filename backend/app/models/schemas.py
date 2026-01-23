@@ -1,0 +1,130 @@
+"""
+Pydantic Schemas for SynapseAI API
+"""
+from pydantic import BaseModel, Field
+from typing import Optional, Any
+from datetime import datetime
+from enum import Enum
+
+
+# === Enums ===
+
+class AnalysisMode(str, Enum):
+    """Available analysis modes."""
+    DOCUMENT = "document"
+    CODE = "code"
+    RESEARCH = "research"
+    LEGAL = "legal"
+
+
+class AnalysisStatus(str, Enum):
+    """Analysis status."""
+    PENDING = "pending"
+    PROCESSING = "processing"
+    COMPLETED = "completed"
+    FAILED = "failed"
+
+
+# === Request Schemas ===
+
+class AnalysisRequest(BaseModel):
+    """Request for document analysis."""
+    mode: AnalysisMode = Field(default=AnalysisMode.DOCUMENT, description="Analysis mode")
+    user_context: Optional[str] = Field(None, description="Additional context from user")
+    parallel_execution: bool = Field(False, description="Run agents in parallel")
+
+
+class SearchRequest(BaseModel):
+    """Request for semantic search."""
+    query: str = Field(..., min_length=2, max_length=1000, description="Search query")
+    n_results: int = Field(5, ge=1, le=20, description="Number of results")
+    mode_filter: Optional[AnalysisMode] = Field(None, description="Filter by mode")
+
+
+class AskRequest(BaseModel):
+    """Request for RAG-powered Q&A."""
+    question: str = Field(..., min_length=5, max_length=2000, description="Question to ask")
+    document_ids: Optional[list[str]] = Field(None, description="Limit to specific documents")
+
+
+# === Response Schemas ===
+
+class DocumentInfo(BaseModel):
+    """Document information."""
+    id: str
+    filename: str
+    doc_type: str
+    word_count: int
+    chunk_count: int
+    uploaded_at: datetime
+    mode: Optional[AnalysisMode] = None
+
+
+class UploadResponse(BaseModel):
+    """Response after document upload."""
+    document_id: str
+    filename: str
+    word_count: int
+    chunks_created: int
+    processing_time_ms: int
+    message: str = "Document uploaded successfully"
+
+
+class AgentResult(BaseModel):
+    """Result from a single agent."""
+    agent_name: str
+    role: str
+    output: dict[str, Any] | str
+    confidence: float
+    tokens_used: int
+    execution_time_ms: int
+
+
+class AnalysisResponse(BaseModel):
+    """Full analysis response."""
+    analysis_id: str
+    document_id: str
+    mode: AnalysisMode
+    status: AnalysisStatus
+    started_at: datetime
+    completed_at: Optional[datetime] = None
+    total_tokens: int
+    total_time_ms: int
+    agents: list[AgentResult]
+    final_output: dict[str, Any]
+
+
+class SearchResult(BaseModel):
+    """Single search result."""
+    content: str
+    document_id: str
+    filename: str
+    chunk_index: int
+    similarity_score: float
+    metadata: dict[str, Any] = {}
+
+
+class SearchResponse(BaseModel):
+    """Search response."""
+    query: str
+    total_results: int
+    results: list[SearchResult]
+    search_time_ms: int
+
+
+class AskResponse(BaseModel):
+    """RAG Q&A response."""
+    question: str
+    answer: str
+    sources: list[SearchResult]
+    tokens_used: int
+    response_time_ms: int
+
+
+class HealthResponse(BaseModel):
+    """Health check response."""
+    status: str = "healthy"
+    version: str
+    vector_db_status: str
+    total_documents: int
+    available_modes: list[str]
