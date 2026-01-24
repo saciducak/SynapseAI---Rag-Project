@@ -3,10 +3,12 @@ Vector Store Service - ChromaDB + Ollama Embeddings
 RAG-powered semantic search and document storage
 """
 import httpx
+import asyncio
 from typing import Optional
 import chromadb
 from chromadb.config import Settings as ChromaSettings
 from loguru import logger
+import hashlib
 
 from app.core.config import get_settings
 from app.utils.chunker import TextChunk
@@ -25,6 +27,8 @@ class VectorService:
         self.settings = get_settings()
         self.ollama_url = "http://localhost:11434"
         self.embedding_model = "nomic-embed-text"  # Small, fast embedding model
+        # Increase timeout for batch operations
+        self.timeout = httpx.Timeout(60.0, connect=10.0)
         
         # Initialize ChromaDB
         self.client = chromadb.Client(ChromaSettings(
@@ -40,43 +44,62 @@ class VectorService:
         
         logger.info(f"VectorService initialized with collection: {collection_name}")
     
-    def _get_embeddings(self, texts: list[str]) -> list[list[float]]:
-        """Get embeddings from Ollama."""
+    async def _get_embeddings_batch(self, texts: list[str]) -> list[list[float]]:
+        """Get embeddings from Ollama in batches."""
         embeddings = []
+        batch_size = 10  # Ollama handles small batches better
         
-        # Process each text (Ollama processes one at a time)
-        for text in texts:
-            try:
-                response = httpx.post(
-                    f"{self.ollama_url}/api/embeddings",
-                    json={
-                        "model": self.embedding_model,
-                        "prompt": text
-                    },
-                    timeout=60.0
-                )
-                response.raise_for_status()
-                result = response.json()
-                embeddings.append(result["embedding"])
-            except httpx.ConnectError:
-                logger.warning("Ollama not available for embeddings, using simple hash")
-                # Fallback: simple hash-based embedding (not semantic but works)
-                embeddings.append(self._simple_embedding(text))
-            except Exception as e:
-                logger.error(f"Embedding error: {e}")
-                embeddings.append(self._simple_embedding(text))
-        
+        async with httpx.AsyncClient(timeout=self.timeout) as client:
+            for i in range(0, len(texts), batch_size):
+                batch = texts[i:i + batch_size]
+                
+                # Process batch concurrently
+                tasks = []
+                for text in batch:
+                    tasks.append(self._fetch_embedding(client, text))
+                
+                batch_results = await asyncio.gather(*tasks, return_exceptions=True)
+                
+                for res in batch_results:
+                    if isinstance(res, list):
+                        embeddings.append(res)
+                    else:
+                        logger.error(f"Embedding failed: {res}")
+                        # Fallback to hash if embedding fails
+                        embeddings.append(self._simple_embedding("error"))
+
         return embeddings
+
+    async def _fetch_embedding(self, client: httpx.AsyncClient, text: str) -> list[float]:
+        """Fetch single embedding (helper for batch)."""
+        try:
+            response = await client.post(
+                f"{self.ollama_url}/api/embeddings",
+                json={
+                    "model": self.embedding_model,
+                    "prompt": text
+                }
+            )
+            response.raise_for_status()
+            return response.json()["embedding"]
+        except Exception as e:
+            logger.warning(f"Embedding error: {e}, using fallback")
+            return self._simple_embedding(text)
     
-    def _simple_embedding(self, text: str, dim: int = 384) -> list[float]:
+    def _simple_embedding(self, text: str, dim: int = 768) -> list[float]:
         """Simple hash-based embedding fallback."""
-        import hashlib
-        # Create a deterministic embedding from text hash
+        # Nomic embed text is 768 dim usually, but let's confirm usage
+        # Ensuring dimension consistency is key. Nomic is 768.
+        # If using llama2/3 default it might be different (4096).
+        # We'll stick to 768 as a safe default for this model.
         hash_bytes = hashlib.sha256(text.encode()).digest()
         embedding = []
-        for i in range(dim):
-            byte_idx = i % len(hash_bytes)
-            embedding.append((hash_bytes[byte_idx] - 128) / 128.0)
+        while len(embedding) < dim:
+             # Extend hash if needed
+             hash_bytes = hashlib.sha256(hash_bytes).digest()
+             for b in hash_bytes:
+                 if len(embedding) < dim:
+                     embedding.append((b - 128) / 128.0)
         return embedding
     
     async def add_document(
@@ -87,14 +110,6 @@ class VectorService:
     ) -> int:
         """
         Add document chunks to vector store.
-        
-        Args:
-            document_id: Unique document identifier
-            chunks: List of text chunks
-            metadata: Document metadata
-            
-        Returns:
-            Number of chunks added
         """
         if not chunks:
             return 0
@@ -112,10 +127,11 @@ class VectorService:
             for chunk in chunks
         ]
         
-        # Get embeddings
-        embeddings = self._get_embeddings(documents)
+        # Get embeddings with batching
+        logger.info(f"Generating embeddings for {len(documents)} chunks...")
+        embeddings = await self._get_embeddings_batch(documents)
         
-        # Add to collection
+        # Add to collection (Chroma is sync but fast for local)
         self.collection.add(
             ids=ids,
             documents=documents,
@@ -134,17 +150,10 @@ class VectorService:
     ) -> list[dict]:
         """
         Semantic search across documents.
-        
-        Args:
-            query: Search query
-            n_results: Number of results to return
-            filter_metadata: Optional metadata filter
-            
-        Returns:
-            List of search results with content, metadata, and similarity score
         """
-        # Get query embedding
-        query_embedding = self._get_embeddings([query])[0]
+        # Get query embedding (single)
+        async with httpx.AsyncClient(timeout=self.timeout) as client:
+             query_embedding = await self._fetch_embedding(client, query)
         
         # Search
         results = self.collection.query(
@@ -158,7 +167,6 @@ class VectorService:
         if results['documents'] and results['documents'][0]:
             for i, doc in enumerate(results['documents'][0]):
                 distance = results['distances'][0][i] if results['distances'] else 0
-                # Convert distance to similarity score (cosine: 1 - distance)
                 similarity = 1 - distance
                 
                 formatted.append({
@@ -223,10 +231,8 @@ class VectorService:
     
     async def list_documents(self) -> list[dict]:
         """List all unique documents in the collection."""
-        # Get all metadata
         results = self.collection.get(limit=10000)
         
-        # Extract unique documents
         documents = {}
         if results['metadatas']:
             for meta in results['metadatas']:

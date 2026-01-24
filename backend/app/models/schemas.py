@@ -47,6 +47,26 @@ class AskRequest(BaseModel):
     document_ids: Optional[list[str]] = Field(None, description="Limit to specific documents")
 
 
+class ChatMessage(BaseModel):
+    """Single chat message."""
+    role: str = Field(..., pattern="^(user|assistant|system)$")
+    content: str
+
+
+class ChatRequest(BaseModel):
+    """Request for interactive chat."""
+    message: str
+    document_id: Optional[str] = None
+    history: list[ChatMessage] = []
+
+
+class ChatResponse(BaseModel):
+    """Response for interactive chat."""
+    response: str
+    sources: list[dict[str, Any]] = []
+    processing_time_ms: int
+
+
 # === Response Schemas ===
 
 class DocumentInfo(BaseModel):

@@ -22,15 +22,15 @@ class TextChunk:
 class SmartTextChunker:
     """
     Intelligent text chunker that respects semantic boundaries.
-    - Keeps paragraphs together when possible
+    - Keeps sentences intact
     - Maintains overlap for context preservation
     - Handles code differently than prose
     """
     
     def __init__(
         self,
-        chunk_size: int = 1000,
-        chunk_overlap: int = 200,
+        chunk_size: int = 1500, # Increased for better context
+        chunk_overlap: int = 300,
         min_chunk_size: int = 100,
         respect_code_blocks: bool = True
     ):
@@ -47,27 +47,22 @@ class SmartTextChunker:
     ) -> list[TextChunk]:
         """
         Split text into semantic chunks.
-        
-        Args:
-            text: Text to chunk
-            metadata: Metadata to attach to each chunk
-            is_code: Whether the text is code
-            
-        Returns:
-            List of TextChunk objects
         """
         metadata = metadata or {}
         
         # Clean text
         text = self._clean_text(text)
         
-        if not text or len(text) < self.min_chunk_size:
+        if not text:
+            return []
+            
+        if len(text) < self.min_chunk_size:
             return [TextChunk(
                 content=text,
                 index=0,
                 token_count=self._estimate_tokens(text),
                 metadata={**metadata, "chunk_index": 0}
-            )] if text else []
+            )]
         
         # Choose splitting strategy
         if is_code:
@@ -88,93 +83,104 @@ class SmartTextChunker:
     
     def _clean_text(self, text: str) -> str:
         """Clean and normalize text."""
+        # Normalize newlines
+        text = text.replace('\r\n', '\n')
         # Remove excessive whitespace
-        text = re.sub(r'\n{4,}', '\n\n\n', text)
-        text = re.sub(r' {3,}', '  ', text)
+        text = re.sub(r'\n{3,}', '\n\n', text)
+        text = re.sub(r'[ \t]{2,}', ' ', text)
         return text.strip()
     
+    def _split_sentences(self, text: str) -> list[str]:
+        """
+        Split text into sentences using regex.
+        Uses a lookbehind for sentence terminators (.!?) followed by whitespace.
+        """
+        # Split by sentence terminators, keeping the terminator
+        # Pattern: (?<=[.!?])\s+ -> Split after .!? followed by whitespace
+        sentences = re.split(r'(?<=[.!?])\s+', text)
+        return [s.strip() for s in sentences if s.strip()]
+
     def _chunk_prose(self, text: str) -> list[str]:
-        """Chunk prose text by paragraphs."""
-        # Split by paragraphs
-        paragraphs = re.split(r'\n\n+', text)
-        paragraphs = [p.strip() for p in paragraphs if p.strip()]
+        """
+        Chunk prose text by sentences to preserve semantic meaning.
+        """
+        sentences = self._split_sentences(text)
+        chunks = []
+        current_chunk = []
+        current_length = 0
         
-        return self._merge_into_chunks(paragraphs)
+        for sentence in sentences:
+            sentence_len = len(sentence)
+            
+            # If a single sentence is huge, we must split it (rare fallback)
+            if sentence_len > self.chunk_size:
+                # If current chunk has content, save it first
+                if current_chunk:
+                    chunks.append(" ".join(current_chunk))
+                    current_chunk = []
+                    current_length = 0
+                
+                # Treat huge sentence as a whole chunk (or split roughly)
+                chunks.append(sentence)
+                continue
+
+            # If adding this sentence exceeds chunk size
+            if current_length + sentence_len + 1 > self.chunk_size and current_chunk:
+                # Save current chunk
+                chunk_text = " ".join(current_chunk)
+                chunks.append(chunk_text)
+                
+                # Start new chunk with overlap
+                # Calculate how many sentences from the end of previous chunk to keep
+                overlap_len = 0
+                overlap_sentences = []
+                for s in reversed(current_chunk):
+                    if overlap_len + len(s) > self.chunk_overlap:
+                        break
+                    overlap_sentences.insert(0, s)
+                    overlap_len += len(s)
+                
+                current_chunk = overlap_sentences + [sentence]
+                current_length = overlap_len + sentence_len
+            else:
+                current_chunk.append(sentence)
+                current_length += sentence_len + 1 # +1 for space
+        
+        # Last chunk
+        if current_chunk:
+            chunks.append(" ".join(current_chunk))
+            
+        return chunks
     
     def _chunk_code(self, text: str) -> list[str]:
-        """Chunk code by logical blocks (functions, classes)."""
+        """Chunk code by logical blocks (unchanged logic mostly)."""
+        # Code usually has newlines as structural elements
         lines = text.split('\n')
-        
-        # Find natural break points (empty lines, function/class definitions)
-        blocks = []
-        current_block = []
-        
-        for line in lines:
-            # Check for natural break points
-            is_break = (
-                not line.strip() or  # Empty line
-                line.strip().startswith(('def ', 'class ', 'function ', 'const ', 'let ', 'var ', 'public ', 'private '))
-            )
-            
-            if is_break and current_block and len('\n'.join(current_block)) > self.min_chunk_size:
-                blocks.append('\n'.join(current_block))
-                current_block = [line] if line.strip() else []
-            else:
-                current_block.append(line)
-        
-        if current_block:
-            blocks.append('\n'.join(current_block))
-        
-        return self._merge_into_chunks(blocks)
-    
-    def _merge_into_chunks(self, blocks: list[str]) -> list[str]:
-        """Merge blocks into appropriately sized chunks with overlap."""
-        if not blocks:
-            return []
         
         chunks = []
         current_chunk = []
         current_length = 0
         
-        for block in blocks:
-            block_length = len(block)
+        for line in lines:
+            line_len = len(line) + 1 # +1 for newline
             
-            # If adding this block exceeds chunk size
-            if current_length + block_length > self.chunk_size and current_chunk:
-                # Save current chunk
-                chunk_text = '\n\n'.join(current_chunk)
-                chunks.append(chunk_text)
+            if current_length + line_len > self.chunk_size and current_chunk:
+                chunks.append('\n'.join(current_chunk))
                 
-                # Start new chunk with overlap
-                overlap_content = self._get_overlap_content(current_chunk)
-                if overlap_content:
-                    current_chunk = [overlap_content, block]
-                    current_length = len(overlap_content) + block_length
-                else:
-                    current_chunk = [block]
-                    current_length = block_length
+                # Simple overlap for code (last N lines)
+                overlap_lines = []
+                start_overlap_idx = max(0, len(current_chunk) - 10) # Last 10 lines as overlap
+                overlaps = current_chunk[start_overlap_idx:]
+                current_chunk = overlaps + [line]
+                current_length = sum(len(l) + 1 for l in current_chunk)
             else:
-                current_chunk.append(block)
-                current_length += block_length
+                current_chunk.append(line)
+                current_length += line_len
         
-        # Don't forget the last chunk
         if current_chunk:
-            chunks.append('\n\n'.join(current_chunk))
-        
+            chunks.append('\n'.join(current_chunk))
+            
         return chunks
-    
-    def _get_overlap_content(self, chunks: list[str]) -> str:
-        """Get overlap content from previous chunk for context."""
-        if not chunks:
-            return ""
-        
-        last_block = chunks[-1]
-        
-        if len(last_block) <= self.chunk_overlap:
-            return last_block
-        
-        # Take last N characters with "..." prefix
-        return "..." + last_block[-self.chunk_overlap:]
     
     def _estimate_tokens(self, text: str) -> int:
         """

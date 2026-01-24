@@ -2,7 +2,7 @@
 LLM Service - Ollama Local LLM Wrapper
 Handles all LLM interactions with Ollama for free local inference
 """
-import requests
+import httpx
 import json
 from typing import Optional
 from loguru import logger
@@ -17,13 +17,15 @@ settings = get_settings()
 class LLMService:
     """
     Ollama LLM service wrapper.
-    Uses sync requests for reliable Ollama API calls.
+    Uses async httpx client for non-blocking I/O.
     """
     
     def __init__(self):
         self.settings = get_settings()
         self.base_url = "http://localhost:11434"
         self.default_model = "llama3.2"
+        # Increase timeout for complex reasoning
+        self.timeout = httpx.Timeout(300.0, connect=10.0)
         logger.info(f"LLMService initialized with base_url={self.base_url}, model={self.default_model}")
     
     async def chat(
@@ -31,77 +33,77 @@ class LLMService:
         messages: list[dict],
         model: Optional[str] = None,
         temperature: float = 0.7,
-        max_tokens: int = 2000,
+        max_tokens: int = 4000,
         response_format: Optional[dict] = None
     ) -> tuple[str, int]:
         """
-        Send a chat completion request to Ollama.
+        Send a chat completion request to Ollama asynchronously.
         """
-        try:
-            # Convert messages to single prompt
-            prompt_parts = []
-            for msg in messages:
-                role = msg.get("role", "user")
-                content = msg.get("content", "")
-                if role == "system":
-                    prompt_parts.append(f"System: {content}\n\n")
-                elif role == "user":
-                    prompt_parts.append(f"User: {content}\n\n")
-                elif role == "assistant":
-                    prompt_parts.append(f"Assistant: {content}\n\n")
-            
-            prompt_parts.append("Assistant: ")
-            full_prompt = "".join(prompt_parts)
-            
-            # Build payload
-            payload = {
-                "model": model or self.default_model,
-                "prompt": full_prompt[:500],  # Truncate for faster response during testing
-                "stream": False,
-                "options": {
-                    "temperature": temperature,
-                    "num_predict": min(max_tokens, 500)  # Limit for faster testing
-                }
+        # Convert messages to single prompt
+        prompt_parts = []
+        for msg in messages:
+            role = msg.get("role", "user")
+            content = msg.get("content", "")
+            if role == "system":
+                prompt_parts.append(f"System: {content}\n\n")
+            elif role == "user":
+                prompt_parts.append(f"User: {content}\n\n")
+            elif role == "assistant":
+                prompt_parts.append(f"Assistant: {content}\n\n")
+        
+        prompt_parts.append("Assistant: ")
+        full_prompt = "".join(prompt_parts)
+        
+        # Build payload
+        payload = {
+            "model": model or self.default_model,
+            "prompt": full_prompt, # Remove hard truncation for better quality
+            "stream": False,
+            "context": [], # Clear previous context to avoid confusion
+            "options": {
+                "temperature": temperature,
+                "num_predict": max_tokens,
+                "num_ctx": 4096 # Explicit context window size
             }
-            
-            # Add JSON format if requested
-            if response_format and response_format.get("type") == "json_object":
-                payload["format"] = "json"
-            
-            url = f"{self.base_url}/api/generate"
-            logger.info(f"🔥 CALLING OLLAMA: {url}")
-            logger.info(f"🔥 MODEL: {payload['model']}")
-            logger.info(f"🔥 PROMPT LENGTH: {len(full_prompt)} chars")
-            
-            # Make sync request
-            response = requests.post(
-                url,
-                json=payload,
-                headers={"Content-Type": "application/json"},
-                timeout=120
-            )
-            
-            logger.info(f"🔥 RESPONSE STATUS: {response.status_code}")
-            
-            if response.status_code != 200:
-                logger.error(f"🔥 RESPONSE TEXT: {response.text[:500]}")
-            
-            response.raise_for_status()
-            
-            result = response.json()
-            content = result.get("response", "")
-            tokens = result.get("eval_count", len(content.split()) * 2)
-            
-            logger.info(f"✅ Ollama success: ~{tokens} tokens")
-            return content, tokens
-            
-        except requests.exceptions.ConnectionError as e:
+        }
+        
+        # Add JSON format if requested
+        if response_format and response_format.get("type") == "json_object":
+            payload["format"] = "json"
+        
+        url = f"{self.base_url}/api/generate"
+        logger.info(f"🔥 CALLING OLLAMA: {url}")
+        logger.info(f"🔥 MODEL: {payload['model']}")
+        logger.info(f"🔥 PROMPT LENGTH: {len(full_prompt)} chars")
+        
+        try:
+            async with httpx.AsyncClient(timeout=self.timeout) as client:
+                response = await client.post(
+                    url,
+                    json=payload,
+                    headers={"Content-Type": "application/json"}
+                )
+                
+                logger.info(f"🔥 RESPONSE STATUS: {response.status_code}")
+                
+                if response.status_code != 200:
+                    logger.error(f"🔥 RESPONSE TEXT: {response.text[:500]}")
+                    response.raise_for_status()
+                
+                result = response.json()
+                content = result.get("response", "")
+                # Fallback token estimation if eval_count missing
+                tokens = result.get("eval_count", len(content.split()) * 1.5)
+                
+                logger.info(f"✅ Ollama success: ~{int(tokens)} tokens")
+                return content, int(tokens)
+                
+        except httpx.ConnectError as e:
             logger.error(f"❌ Connection error: {e}")
-            raise LLMError("Ollama not running. Please start Ollama first.")
-        except requests.exceptions.HTTPError as e:
+            raise LLMError("Ollama not running. Please start Ollama (ollama serve).")
+        except httpx.HTTPStatusError as e:
             logger.error(f"❌ HTTP error: {e}")
-            logger.error(f"❌ Response: {e.response.text if e.response else 'No response'}")
-            raise LLMError(f"LLM call failed: {str(e)}")
+            raise LLMError(f"LLM call failed: {e.response.text}")
         except Exception as e:
             logger.error(f"❌ Unexpected error: {type(e).__name__}: {e}")
             raise LLMError(f"LLM call failed: {str(e)}")

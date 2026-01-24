@@ -9,7 +9,7 @@ from loguru import logger
 import sys
 
 from app.core.config import get_settings
-from app.api.routes import documents, analysis, search
+from app.api.routes import documents, analysis, search, chat
 from app.services.vector import get_vector_service
 from app.models.schemas import HealthResponse
 
@@ -96,6 +96,12 @@ app.include_router(
     search.router,
     prefix="/api/search",
     tags=["Search"]
+)
+
+app.include_router(
+    chat.router,
+    prefix="/api/chat",
+    tags=["Chat"]
 )
 
 

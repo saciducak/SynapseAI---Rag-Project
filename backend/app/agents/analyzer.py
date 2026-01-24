@@ -24,48 +24,45 @@ class AnalyzerAgent(BaseAgent):
     
     @property
     def system_prompt(self) -> str:
-        return """You are an expert Document Analyzer. Analyze the document thoroughly and extract ALL useful information.
+        return """You are an expert Document Analysis AI. Your goal is to extract high-quality, actionable intelligence from documents.
+        
+IMPORTANT: You MUST respond with ONLY valid JSON.
+DO NOT use markdown formatting (like ```json), just output the raw JSON object.
 
-IMPORTANT: You MUST respond with ONLY valid JSON. No explanations, no markdown, just pure JSON.
+Your analysis must be evidence-based and specific. Avoid generic statements.
+If a field is not applicable, use null or empty list.
 
-Your analysis must include:
-1. document_type: What type of document is this? (report, email, contract, memo, proposal, code, research, article, etc.)
-2. main_topics: List 3-5 main subjects discussed (be specific, not generic)
-3. key_entities: Extract ALL entities found:
-   - people: Names of people mentioned
-   - organizations: Company/org names
-   - dates: Any dates mentioned
-   - locations: Places mentioned
-   - monetary_values: Any money amounts
-4. sentiment: Overall tone (positive/negative/neutral/mixed)
-5. complexity_score: 1-10 rating of document complexity
-6. key_points: List 3-7 most important takeaways (be detailed and specific)
-7. structure: Brief description of how document is organized
-8. language: Primary language of document
-
-JSON OUTPUT FORMAT:
+JSON OUTPUT STRUCTURE:
 {
-    "document_type": "specific type here",
-    "main_topics": ["Topic 1 - be specific", "Topic 2", "Topic 3"],
+    "document_type": "Specific type (e.g., Q3 Financial Report, Python Backend Source Code, SaaS Service Agreement)",
+    "main_topics": ["Specific Topic 1", "Specific Topic 2"],
+    "summary_abstract": "A high-level executive summary (max 3 sentences)",
     "key_entities": {
-        "people": ["Name1", "Name2"],
-        "organizations": ["Org1", "Org2"],
-        "dates": ["2024-01-15", "Q1 2024"],
+        "people": ["Full Name (Role)"],
+        "organizations": ["Org Name"],
+        "dates": ["YYYY-MM-DD or Context"],
         "locations": ["City, Country"],
-        "monetary_values": ["$50,000", "€10M"]
+        "monetary_values": ["$10,000", "€5M"],
+        "technical_terms": ["Term 1", "Term 2"]
     },
-    "sentiment": "positive",
-    "complexity_score": 6,
-    "key_points": [
-        "First important finding with details",
-        "Second key point with specifics",
-        "Third takeaway explained clearly"
+    "sentiment": {
+        "score": 0.8, // -1.0 to 1.0
+        "label": "positive/neutral/negative",
+        "reasoning": "Brief explanation"
+    },
+    "complexity_score": 7, // 1-10 (1=Simple Memo, 10=Quantum Physics Paper)
+    "key_insights": [
+        {
+            "insight": "The core finding or statement",
+            "evidence": "Quote or reference from text",
+            "importance": "high/medium/low"
+        }
     ],
-    "structure": "Document has X sections covering Y topics",
-    "language": "English"
+    "structure": "Description of document organization",
+    "language": "English/Turkish/etc"
 }
 
-CRITICAL: Output ONLY the JSON object, nothing else. Every field must be present."""
+CRITICAL: Output ONLY valid JSON."""
     
     async def process(self, input_data: dict[str, Any]) -> AgentResult:
         """Analyze the document."""
@@ -75,30 +72,33 @@ CRITICAL: Output ONLY the JSON object, nothing else. Every field must be present
         metadata = input_data.get("metadata", {})
         mode = input_data.get("mode", "document")
         
-        # Truncate for context limits
-        content_preview = content[:12000]
+        # INCREASED CONTEXT WINDOW: 12k -> 30k
+        # Llama 3.2 accepts up to 128k, but 30k is a safe safe spot for speed/quality on local devices
+        content_preview = content[:30000]
         
-        prompt = f"""Analyze the following document:
-
-## Document Metadata:
+        prompt = f"""Analyze this document thoroughly:
+        
+## Metadata
 - Filename: {metadata.get('filename', 'Unknown')}
 - Type: {metadata.get('doc_type', 'Unknown')}
 - Word Count: {metadata.get('word_count', len(content.split()))}
 - Mode: {mode}
 
-## Document Content:
+## Content Snippet
 {content_preview}
 
 ---
-Provide comprehensive analysis in the specified JSON format."""
+Perform a deep spectrum analysis and output the requested JSON."""
 
         response, tokens = await self._call_llm(prompt, json_mode=True)
         
         try:
             analysis = json.loads(response)
-            confidence = 0.9
+            confidence = 0.95
         except json.JSONDecodeError:
-            analysis = {"raw_response": response, "parse_error": True}
+            # Fallback for minor json errors
+            logger.warning("JSON Decode Error in Analyzer")
+            analysis = {"raw_response": response, "parse_error": True, "summary": "Analysis completed but JSON was malformed."}
             confidence = 0.5
         
         return self._create_result(
@@ -125,31 +125,47 @@ class CodeAnalyzerAgent(BaseAgent):
     
     @property
     def system_prompt(self) -> str:
-        return """You are an expert Senior Software Architect and Code Auditor.
+        return """You are a Principal Software Architect and Security Expert.
+        
+Your goal is to perform a rigorous code review. Focus on:
+1. Security Vulnerabilities (OWASP Top 10)
+2. Performance Bottlenecks
+3. Architectural Flaws (Anti-patterns)
+4. Clean Code Principles (SOLID, DRY)
 
 IMPORTANT: You MUST respond with ONLY valid JSON.
-
-Your goal is to conduct a deep technical review of the code.
 
 JSON OUTPUT STRUCTURE:
 {
     "language": "python/javascript/etc",
     "quality_score": 8, // 0-10
-    "summary": "Technical summary of what the code does",
-    "architecture_analysis": "Assessment of structure, patterns used, and modularity",
+    "summary": "Technical summary of the module's purpose",
+    "architecture_analysis": "Assessment of design patterns and structure",
     "bugs": [
-        {"line": 10, "severity": "high/medium/low", "issue": "Description", "fix": "Suggested fix"}
+        {
+            "line": 10, 
+            "severity": "high/medium/low", 
+            "issue": "Concise issue description", 
+            "fix": "Specific code fix or suggestion"
+        }
     ],
     "security_issues": [
-        {"severity": "critical/high", "type": "SQL Injection/XSS/etc", "description": "Details", "mitigation": "How to fix"}
+        {
+            "severity": "critical/high", 
+            "type": "SQL Injection/XSS/Command Injection", 
+            "description": "How the exploit works here", 
+            "mitigation": "Secure implementation details"
+        }
     ],
     "refactoring_suggestions": [
-        {"priority": "high", "suggestion": "Extract method X", "reason": "Function is too long (50+ lines)"}
+        {
+            "priority": "high", 
+            "suggestion": "Extract Function / Rename Variable", 
+            "reason": "Cyclomatic complexity is too high"
+        }
     ],
     "complexity": "low/medium/high"
-}
-
-CRITICAL: Output ONLY JSON. Be highly technical and critical."""
+}"""
     
     async def process(self, input_data: dict[str, Any]) -> AgentResult:
         """Analyze code."""
@@ -158,24 +174,25 @@ CRITICAL: Output ONLY JSON. Be highly technical and critical."""
         content = input_data.get("content", "")
         metadata = input_data.get("metadata", {})
         
-        prompt = f"""Review the following code:
+        # 30k context for code is crucial
+        prompt = f"""Review the following code file:
         
 ## File Info:
 - Filename: {metadata.get('filename', 'unknown')}
 - Language: {metadata.get('language', 'auto-detect')}
 
-## Code:
+## Code Content:
 ```
-{content[:15000]}
+{content[:30000]}
 ```
 
-Provide a thorough, architect-level code review in JSON."""
+Provide a strict, senior-level architectural review in JSON."""
 
         response, tokens = await self._call_llm(prompt, json_mode=True, max_tokens=3000)
         
         try:
             analysis = json.loads(response)
-            confidence = 0.85
+            confidence = 0.9
         except json.JSONDecodeError:
             analysis = {"raw_response": response, "parse_error": True}
             confidence = 0.5
@@ -186,7 +203,6 @@ Provide a thorough, architect-level code review in JSON."""
 class ResearchAnalyzerAgent(BaseAgent):
     """
     Research Paper Analyzer Agent.
-    Specialized for academic papers and research documents.
     """
     
     def __init__(self):
@@ -199,64 +215,54 @@ class ResearchAnalyzerAgent(BaseAgent):
     
     @property
     def system_prompt(self) -> str:
-        return """You are an expert Academic Researcher. Analyze the research paper with academic rigor.
+        return """You are a Distinguished Academic Reviewer. Analyze the research paper for scientific validity and novelty.
 
 IMPORTANT: You MUST respond with ONLY valid JSON.
 
 JSON OUTPUT STRUCTURE:
 {
     "title": "Paper Title",
-    "authors": ["Author 1", "Author 2"],
-    "research_question": "What is the core problem being solved?",
+    "authors": ["Author List"],
+    "research_question": "The core hypothesis or problem",
     "methodology": {
         "type": "Qualitative/Quantitative/Mixed",
-        "details": "Description of methods used (e.g. Transformer architecture, Double-blind study)"
+        "description": "Detailed study design",
+        "sample_size": "N=..."
     },
     "key_findings": [
-        "Finding 1 with statistical significance if available",
+        "Finding 1 (Statistically Significant?)",
         "Finding 2"
     ],
-    "novelty": "What is new/unique about this work?",
-    "limitations": ["Limitation 1", "Limitation 2"],
-    "implications": "Theoretical or practical impact of this work",
-    "future_work": "Suggestions for future research mentioned"
-}
-
-CRITICAL: Output ONLY JSON. Focus on methodology and validity."""
+    "novelty_score": 8, // 1-10
+    "limitations": ["Limitation A", "Limitation B"],
+    "implications": "Real-world or theoretical impact",
+    "future_work": "Suggested next steps"
+}"""
     
     async def process(self, input_data: dict[str, Any]) -> AgentResult:
-        """Analyze research paper."""
         start_time = time.time()
-        
-        content = input_data.get("content", "")
+        content = input_data.get("content", "")[:30000] # Increased context
         metadata = input_data.get("metadata", {})
         
-        prompt = f"""Analyze this research paper:
-
-## Document Info:
-- Filename: {metadata.get('filename', 'unknown')}
-
-## Content:
-{content[:14000]}
-
-Extract academic insights in JSON format."""
+        prompt = f"""Analyze research paper: {metadata.get('filename', 'unknown')}
+        
+{content}
+        
+Extract academic insights in strict JSON."""
 
         response, tokens = await self._call_llm(prompt, json_mode=True, max_tokens=2500)
-        
         try:
             analysis = json.loads(response)
-            confidence = 0.85
+            confidence = 0.9
         except json.JSONDecodeError:
             analysis = {"raw_response": response, "parse_error": True}
             confidence = 0.5
-        
         return self._create_result(output=analysis, tokens=tokens, start_time=start_time, confidence=confidence)
 
 
 class LegalAnalyzerAgent(BaseAgent):
     """
     Legal Document Analyzer Agent.
-    Specialized for contracts, regulations, and legal documents.
     """
     
     def __init__(self):
@@ -269,64 +275,44 @@ class LegalAnalyzerAgent(BaseAgent):
     
     @property
     def system_prompt(self) -> str:
-        return """You are an expert Legal Analyst. Analyze the legal document for risks, obligations, and compliance.
+        return """You are a Senior Legal Counsel. Analyze the document for risk, compliance, and binding obligations.
 
 IMPORTANT: You MUST respond with ONLY valid JSON.
 
 JSON OUTPUT STRUCTURE:
 {
-    "document_type": "NDA/SaaS Agreement/Employment Contract/etc",
-    "parties": [{"name": "Party A", "role": "Provider"}, {"name": "Party B", "role": "Client"}],
-    "key_dates": {"effective_date": "Date", "termination_date": "Date", "renewal": "Auto-renew?"},
+    "document_type": "NDA/MSA/SLA/Lease/etc",
+    "parties": [{"name": "Party A", "role": "Provider/Clent"}],
+    "term_dates": {"effective": "Date", "expiration": "Date", "renewal": "Terms"},
     "obligations": [
-        {"party": "Party A", "obligation": "Must deliver X by Y"}
+        {"party": "Name", "description": "Must do X", "deadline": "if applicable"}
     ],
-    "rights": [
-        {"party": "Party B", "right": "Right to audit"}
-    ],
-    "risk_analysis": [
-        {"risk": "Unlimited Liability Clause", "severity": "CRITICAL", "explanation": "Clause 5 exposes Client to unlimited damages"}
-    ],
-    "red_flags": ["Missing termination clause", "Ambiguous payment terms"],
-    "jurisdiction": "Governing Law (e.g. California, UK)",
-    "compliance_check": "GDPR/CCPA mentioned?"
-}
-
-DISCLAIMER: This is AI analysis, not legal advice.
-
-CRITICAL: Output ONLY JSON. Be extremely precise with legal terms."""
+    "risk_assessment": {
+        "score": "High/Medium/Low",
+        "critical_risks": [
+            {"clause": "Indemnification", "risk": "Uncapped liability", "severity": "CRITICAL"}
+        ]
+    },
+    "compliance_flags": ["GDPR", "HIPAA", "Governing Law: NY"],
+    "red_lines": ["List of clauses that typically require negotiation"]
+}"""
     
     async def process(self, input_data: dict[str, Any]) -> AgentResult:
-        """Analyze legal document."""
         start_time = time.time()
+        content = input_data.get("content", "")[:30000] # Increased context
         
-        content = input_data.get("content", "")
-        metadata = input_data.get("metadata", {})
+        prompt = f"""Legal analysis required for:
         
-        prompt = f"""Analyze the following legal document:
-
-## Document Info:
-- Filename: {metadata.get('filename', 'unknown')}
-
-## Content:
-{content[:14000]}
-
-Extract legal-relevant information in the specified JSON format.
-Remember: This is for analysis purposes only, not legal advice."""
+{content}
+        
+Output strict JSON legal assessment."""
 
         response, tokens = await self._call_llm(prompt, json_mode=True, max_tokens=3000)
-        
         try:
             analysis = json.loads(response)
-            analysis["disclaimer"] = "This analysis is not legal advice. Consult a qualified attorney."
-            confidence = 0.8
+            analysis["_disclaimer"] = "AI Analysis - Does not constitute legal advice."
+            confidence = 0.9
         except json.JSONDecodeError:
             analysis = {"raw_response": response, "parse_error": True}
             confidence = 0.5
-        
-        return self._create_result(
-            output=analysis,
-            tokens=tokens,
-            start_time=start_time,
-            confidence=confidence
-        )
+        return self._create_result(output=analysis, tokens=tokens, start_time=start_time, confidence=confidence)
