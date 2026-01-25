@@ -100,8 +100,24 @@ class AgentResult(BaseModel):
     execution_time_ms: int
 
 
+class Citation(BaseModel):
+    """Citation reference to source chunk."""
+    marker: str = Field(..., description="Citation marker like [Chunk 5]")
+    chunk_index: int
+    source_preview: Optional[str] = Field(None, description="Preview of source text")
+    similarity_score: Optional[float] = None
+
+
+class QualityMetrics(BaseModel):
+    """Output quality metrics."""
+    has_structure: bool = True
+    citation_count: int = 0
+    completeness: float = Field(0.0, ge=0, le=1)
+    depth: str = Field("moderate", pattern="^(shallow|moderate|comprehensive)$")
+
+
 class AnalysisResponse(BaseModel):
-    """Full analysis response."""
+    """Full analysis response with quality metrics."""
     analysis_id: str
     document_id: str
     mode: AnalysisMode
@@ -112,6 +128,11 @@ class AnalysisResponse(BaseModel):
     total_time_ms: int
     agents: list[AgentResult]
     final_output: dict[str, Any]
+    # v2.0 Premium Output fields
+    rag_enabled: bool = Field(False, description="Whether RAG was used")
+    confidence_score: Optional[float] = Field(None, ge=0, le=1)
+    citations: list[Citation] = Field(default_factory=list)
+    quality_metrics: Optional[QualityMetrics] = None
 
 
 class SearchResult(BaseModel):

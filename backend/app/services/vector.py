@@ -109,74 +109,166 @@ class VectorService:
         metadata: dict
     ) -> int:
         """
-        Add document chunks to vector store.
+        Add document chunks to vector store with entity enrichment.
+        Embeds both content and extracted keywords for hybrid search.
         """
         if not chunks:
             return 0
         
-        # Prepare data
+        # Prepare data with entity enrichment
         ids = [f"{document_id}_chunk_{chunk.index}" for chunk in chunks]
-        documents = [chunk.content for chunk in chunks]
-        metadatas = [
-            {
+        
+        # Use searchable_text which includes entities for better retrieval
+        documents = [chunk.searchable_text for chunk in chunks]
+        
+        metadatas = []
+        for chunk in chunks:
+            chunk_meta = {
                 **metadata,
                 "document_id": document_id,
                 "chunk_index": chunk.index,
-                "token_count": chunk.token_count
+                "token_count": chunk.token_count,
+                "content_preview": chunk.content[:200],  # Store content preview
             }
-            for chunk in chunks
-        ]
+            
+            # Add entity data for filtering
+            if chunk.entities:
+                entity_dict = chunk.entities.to_dict()
+                # Flatten for ChromaDB (only scalar/list values)
+                chunk_meta["keywords"] = ",".join(entity_dict.get("keywords", [])[:10])
+                chunk_meta["persons"] = ",".join(entity_dict.get("persons", [])[:5])
+                chunk_meta["organizations"] = ",".join(entity_dict.get("organizations", [])[:5])
+                chunk_meta["dates"] = ",".join(entity_dict.get("dates", [])[:5])
+                chunk_meta["has_money"] = len(entity_dict.get("monetary_amounts", [])) > 0
+                chunk_meta["has_email"] = len(entity_dict.get("emails", [])) > 0
+            
+            metadatas.append(chunk_meta)
         
-        # Get embeddings with batching
-        logger.info(f"Generating embeddings for {len(documents)} chunks...")
+        # Get embeddings with batching (embedding searchable_text not raw content)
+        logger.info(f"Generating embeddings for {len(documents)} enriched chunks...")
         embeddings = await self._get_embeddings_batch(documents)
         
-        # Add to collection (Chroma is sync but fast for local)
+        # Add to collection
         self.collection.add(
             ids=ids,
-            documents=documents,
-            embeddings=embeddings,
+            documents=[chunk.content for chunk in chunks],  # Store original content
+            embeddings=embeddings,  # But embed searchable_text
             metadatas=metadatas
         )
         
-        logger.info(f"Added {len(chunks)} chunks for document {document_id}")
+        logger.info(f"Added {len(chunks)} enriched chunks for document {document_id}")
         return len(chunks)
     
     async def search(
         self,
         query: str,
         n_results: int = 5,
-        filter_metadata: Optional[dict] = None
+        filter_metadata: Optional[dict] = None,
+        boost_keywords: bool = True
     ) -> list[dict]:
         """
-        Semantic search across documents.
+        Enhanced semantic search with optional keyword boosting.
+        When boost_keywords is True, results containing query keywords in metadata get higher scores.
         """
         # Get query embedding (single)
         async with httpx.AsyncClient(timeout=self.timeout) as client:
              query_embedding = await self._fetch_embedding(client, query)
         
-        # Search
+        # Search with more results for re-ranking
+        fetch_n = n_results * 2 if boost_keywords else n_results
         results = self.collection.query(
             query_embeddings=[query_embedding],
-            n_results=n_results,
+            n_results=fetch_n,
             where=filter_metadata
         )
         
-        # Format results
+        # Format and optionally boost results
         formatted = []
+        query_words = set(query.lower().split())
+        
         if results['documents'] and results['documents'][0]:
             for i, doc in enumerate(results['documents'][0]):
                 distance = results['distances'][0][i] if results['distances'] else 0
-                similarity = 1 - distance
+                base_similarity = 1 - distance
+                
+                meta = results['metadatas'][0][i] if results['metadatas'] else {}
+                
+                # Keyword boost: increase score if query words appear in extracted keywords
+                boost = 0.0
+                if boost_keywords and meta.get("keywords"):
+                    stored_keywords = set(meta["keywords"].lower().split(","))
+                    overlap = query_words & stored_keywords
+                    boost = len(overlap) * 0.05  # 5% boost per matching keyword
+                
+                final_score = min(base_similarity + boost, 1.0)  # Cap at 1.0
                 
                 formatted.append({
                     "content": doc,
-                    "metadata": results['metadatas'][0][i] if results['metadatas'] else {},
-                    "similarity_score": round(similarity, 4),
-                    "id": results['ids'][0][i] if results['ids'] else ""
+                    "metadata": meta,
+                    "similarity_score": round(final_score, 4),
+                    "base_score": round(base_similarity, 4),
+                    "keyword_boost": round(boost, 4),
+                    "id": results['ids'][0][i] if results['ids'] else "",
+                    "chunk_index": meta.get("chunk_index", 0)
                 })
         
-        return formatted
+        # Re-sort by boosted score
+        if boost_keywords:
+            formatted.sort(key=lambda x: x["similarity_score"], reverse=True)
+        
+        return formatted[:n_results]
+    
+    async def hybrid_search(
+        self,
+        query: str,
+        n_results: int = 5,
+        document_id: Optional[str] = None,
+        entity_filters: Optional[dict] = None
+    ) -> list[dict]:
+        """
+        Hybrid search combining semantic + entity-based filtering.
+        
+        Args:
+            query: Search query
+            n_results: Number of results to return
+            document_id: Optional filter to a specific document
+            entity_filters: Optional filters like {"has_money": True, "organizations": "contains:Google"}
+        """
+        # Build ChromaDB where clause
+        where_clause = {}
+        
+        if document_id:
+            where_clause["document_id"] = document_id
+        
+        if entity_filters:
+            for key, value in entity_filters.items():
+                if isinstance(value, bool):
+                    where_clause[key] = value
+                elif isinstance(value, str) and value.startswith("contains:"):
+                    # ChromaDB doesn't support contains natively, we filter post-query
+                    pass
+                else:
+                    where_clause[key] = value
+        
+        # Perform search with keyword boosting
+        results = await self.search(
+            query=query,
+            n_results=n_results * 2,  # Fetch more for post-filtering
+            filter_metadata=where_clause if where_clause else None,
+            boost_keywords=True
+        )
+        
+        # Post-filter for "contains:" type filters
+        if entity_filters:
+            for key, value in entity_filters.items():
+                if isinstance(value, str) and value.startswith("contains:"):
+                    search_term = value[9:].lower()  # Remove "contains:" prefix
+                    results = [
+                        r for r in results 
+                        if search_term in r["metadata"].get(key, "").lower()
+                    ]
+        
+        return results[:n_results]
     
     async def get_document_chunks(
         self,

@@ -1,5 +1,5 @@
 """
-Multi-Agent Coordinator - Orchestrates agent workflows
+Multi-Agent Coordinator - Orchestrates agent workflows with RAG integration
 """
 import asyncio
 import time
@@ -19,6 +19,7 @@ from app.agents.analyzer import (
 from app.agents.summarizer import SummarizerAgent, CodeSummarizerAgent
 from app.agents.recommender import ActionRecommenderAgent, CodeRecommenderAgent
 from app.models.schemas import AnalysisMode
+from app.services.vector import get_vector_service
 
 
 class WorkflowType(str, Enum):
@@ -251,6 +252,150 @@ class MultiAgentCoordinator:
             success=len(errors) == 0,
             errors=errors
         )
+    
+    async def execute_rag_workflow(
+        self,
+        mode: AnalysisMode,
+        document_id: str,
+        content: str,
+        metadata: dict,
+        focus_query: Optional[str] = None
+    ) -> CoordinationResult:
+        """
+        Execute RAG-enhanced workflow with multi-pass analysis.
+        
+        Pass 1: Retrieve most relevant chunks using hybrid search
+        Pass 2: Analyze with enriched context (chunks + entities)
+        Pass 3: Generate output with citation markers
+        
+        Args:
+            mode: Analysis mode (document, code, research, legal)
+            document_id: Document ID for RAG retrieval
+            content: Full document content
+            metadata: Document metadata
+            focus_query: Optional query to focus the analysis
+        """
+        workflow_id = f"wf_rag_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        started_at = datetime.now()
+        results: dict[str, AgentResult] = {}
+        errors: list[str] = []
+        total_tokens = 0
+        
+        agents = self._get_agents_for_mode(mode)
+        vector_service = get_vector_service()
+        
+        try:
+            # === PASS 1: RAG Retrieval ===
+            logger.info(f"[{workflow_id}] Pass 1: RAG Retrieval...")
+            
+            # Build search query from content summary or focus query
+            search_query = focus_query or self._extract_search_query(content)
+            
+            # Retrieve relevant chunks with hybrid search
+            rag_results = await vector_service.hybrid_search(
+                query=search_query,
+                n_results=8,
+                document_id=document_id
+            )
+            
+            # Format RAG context with citation markers
+            rag_context = self._format_rag_context(rag_results)
+            
+            logger.info(f"[{workflow_id}] Retrieved {len(rag_results)} relevant chunks")
+            
+            # === PASS 2: Enhanced Analysis ===
+            logger.info(f"[{workflow_id}] Pass 2: RAG-Enhanced Analysis...")
+            
+            shared_context = {
+                "content": content[:30000],  # Full content for context
+                "metadata": metadata,
+                "mode": mode.value,
+                "rag_context": rag_context,  # Injected RAG chunks
+                "rag_chunks": rag_results,   # Raw chunks for citation
+                "use_citations": True         # Flag to enable citations
+            }
+            
+            # Run analyzer with RAG context
+            analyzer_result = await agents["analyzer"].process(shared_context)
+            results["analyzer"] = analyzer_result
+            total_tokens += analyzer_result.tokens_used
+            
+            if isinstance(analyzer_result.output, dict):
+                shared_context["analysis"] = analyzer_result.output
+            
+            # === PASS 3: Summarization with Citations ===
+            logger.info(f"[{workflow_id}] Pass 3: Summary with Citations...")
+            
+            summarizer_result = await agents["summarizer"].process(shared_context)
+            results["summarizer"] = summarizer_result
+            total_tokens += summarizer_result.tokens_used
+            
+            if isinstance(summarizer_result.output, dict):
+                shared_context["summary"] = summarizer_result.output
+            
+            # Recommender
+            recommender_result = await agents["recommender"].process(shared_context)
+            results["recommender"] = recommender_result
+            total_tokens += recommender_result.tokens_used
+            
+        except Exception as e:
+            logger.error(f"[{workflow_id}] RAG Workflow error: {e}")
+            errors.append(str(e))
+        
+        completed_at = datetime.now()
+        total_time = int((completed_at - started_at).total_seconds() * 1000)
+        
+        # Compile output with RAG metadata
+        final_output = self._compile_output(results, mode)
+        final_output["rag_enabled"] = True
+        final_output["chunks_retrieved"] = len(rag_results) if 'rag_results' in dir() else 0
+        
+        return CoordinationResult(
+            workflow_id=workflow_id,
+            mode=mode,
+            workflow_type=WorkflowType.FULL,
+            started_at=started_at,
+            completed_at=completed_at,
+            total_tokens=total_tokens,
+            total_time_ms=total_time,
+            results=results,
+            final_output=final_output,
+            success=len(errors) == 0,
+            errors=errors
+        )
+    
+    def _extract_search_query(self, content: str, max_length: int = 500) -> str:
+        """Extract key phrases from content for RAG search."""
+        # Take first paragraph and key sentences
+        lines = content.split('\n')
+        query_parts = []
+        
+        for line in lines[:10]:
+            line = line.strip()
+            if len(line) > 30:
+                query_parts.append(line[:200])
+                if len(' '.join(query_parts)) > max_length:
+                    break
+        
+        return ' '.join(query_parts)[:max_length]
+    
+    def _format_rag_context(self, rag_results: list[dict]) -> str:
+        """Format RAG results into context string with citation markers."""
+        if not rag_results:
+            return "No relevant context retrieved."
+        
+        context_parts = []
+        for i, result in enumerate(rag_results):
+            chunk_idx = result.get("chunk_index", i)
+            score = result.get("similarity_score", 0)
+            content = result.get("content", "")[:800]
+            
+            # Add citation marker
+            context_parts.append(
+                f"[Chunk {chunk_idx}] (Relevance: {score:.2f})\n{content}\n"
+            )
+        
+        return "\n---\n".join(context_parts)
     
     def _compile_output(
         self,

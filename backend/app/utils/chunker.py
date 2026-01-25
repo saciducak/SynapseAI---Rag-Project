@@ -1,22 +1,32 @@
 """
-Smart Text Chunker - Semantic-aware text splitting
+Smart Text Chunker - Semantic-aware text splitting with entity extraction
 """
 from dataclasses import dataclass, field
 from typing import Optional
 import re
 
+from app.utils.entity_extractor import EntityExtractor, ExtractedEntities
+
 
 @dataclass
 class TextChunk:
-    """A chunk of text with metadata."""
+    """A chunk of text with metadata and extracted entities."""
     content: str
     index: int
     token_count: int
     metadata: dict = field(default_factory=dict)
+    entities: Optional[ExtractedEntities] = None
     
     @property
     def char_count(self) -> int:
         return len(self.content)
+    
+    @property
+    def searchable_text(self) -> str:
+        """Get content + entity keywords for hybrid search."""
+        if self.entities:
+            return f"{self.content} {self.entities.to_searchable_string()}"
+        return self.content
 
 
 class SmartTextChunker:
@@ -25,19 +35,23 @@ class SmartTextChunker:
     - Keeps sentences intact
     - Maintains overlap for context preservation
     - Handles code differently than prose
+    - Extracts entities per chunk for VectorDB enrichment
     """
     
     def __init__(
         self,
-        chunk_size: int = 1500, # Increased for better context
+        chunk_size: int = 1500,
         chunk_overlap: int = 300,
         min_chunk_size: int = 100,
-        respect_code_blocks: bool = True
+        respect_code_blocks: bool = True,
+        extract_entities: bool = True
     ):
         self.chunk_size = chunk_size
         self.chunk_overlap = chunk_overlap
         self.min_chunk_size = min_chunk_size
         self.respect_code_blocks = respect_code_blocks
+        self.extract_entities = extract_entities
+        self._entity_extractor = EntityExtractor() if extract_entities else None
     
     def chunk(
         self,
@@ -46,7 +60,7 @@ class SmartTextChunker:
         is_code: bool = False
     ) -> list[TextChunk]:
         """
-        Split text into semantic chunks.
+        Split text into semantic chunks with optional entity extraction.
         """
         metadata = metadata or {}
         
@@ -57,11 +71,15 @@ class SmartTextChunker:
             return []
             
         if len(text) < self.min_chunk_size:
+            entities = None
+            if self._entity_extractor:
+                entities = self._entity_extractor.extract(text)
             return [TextChunk(
                 content=text,
                 index=0,
                 token_count=self._estimate_tokens(text),
-                metadata={**metadata, "chunk_index": 0}
+                metadata={**metadata, "chunk_index": 0},
+                entities=entities
             )]
         
         # Choose splitting strategy
@@ -70,16 +88,22 @@ class SmartTextChunker:
         else:
             chunks = self._chunk_prose(text)
         
-        # Create TextChunk objects
-        return [
-            TextChunk(
-                content=chunk,
+        # Create TextChunk objects with entity extraction
+        result = []
+        for i, chunk_text in enumerate(chunks):
+            entities = None
+            if self._entity_extractor:
+                entities = self._entity_extractor.extract(chunk_text)
+            
+            result.append(TextChunk(
+                content=chunk_text,
                 index=i,
-                token_count=self._estimate_tokens(chunk),
-                metadata={**metadata, "chunk_index": i, "total_chunks": len(chunks)}
-            )
-            for i, chunk in enumerate(chunks)
-        ]
+                token_count=self._estimate_tokens(chunk_text),
+                metadata={**metadata, "chunk_index": i, "total_chunks": len(chunks)},
+                entities=entities
+            ))
+        
+        return result
     
     def _clean_text(self, text: str) -> str:
         """Clean and normalize text."""

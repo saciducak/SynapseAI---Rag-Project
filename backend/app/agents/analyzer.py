@@ -65,16 +65,34 @@ JSON OUTPUT STRUCTURE:
 CRITICAL: Output ONLY valid JSON."""
     
     async def process(self, input_data: dict[str, Any]) -> AgentResult:
-        """Analyze the document."""
+        """Analyze the document with optional RAG context."""
         start_time = time.time()
         
         content = input_data.get("content", "")
         metadata = input_data.get("metadata", {})
         mode = input_data.get("mode", "document")
+        rag_context = input_data.get("rag_context", "")
+        use_citations = input_data.get("use_citations", False)
         
         # INCREASED CONTEXT WINDOW: 12k -> 30k
-        # Llama 3.2 accepts up to 128k, but 30k is a safe safe spot for speed/quality on local devices
         content_preview = content[:30000]
+        
+        # Build prompt with RAG context if available
+        rag_section = ""
+        if rag_context:
+            rag_section = f"""
+## Retrieved Context (Use for Evidence)
+The following sections were identified as most relevant. Cite them using [Chunk X] markers.
+
+{rag_context}
+---
+"""
+        
+        citation_instruction = ""
+        if use_citations:
+            citation_instruction = """
+IMPORTANT: For each key finding, include an "evidence" field with a direct quote AND a "source" field with the chunk number like "[Chunk 3]".
+"""
         
         prompt = f"""Analyze this document thoroughly:
         
@@ -83,10 +101,10 @@ CRITICAL: Output ONLY valid JSON."""
 - Type: {metadata.get('doc_type', 'Unknown')}
 - Word Count: {metadata.get('word_count', len(content.split()))}
 - Mode: {mode}
-
+{rag_section}
 ## Content Snippet
-{content_preview}
-
+{content_preview[:20000]}
+{citation_instruction}
 ---
 Perform a deep spectrum analysis and output the requested JSON."""
 
@@ -96,7 +114,6 @@ Perform a deep spectrum analysis and output the requested JSON."""
             analysis = json.loads(response)
             confidence = 0.95
         except json.JSONDecodeError:
-            # Fallback for minor json errors
             logger.warning("JSON Decode Error in Analyzer")
             analysis = {"raw_response": response, "parse_error": True, "summary": "Analysis completed but JSON was malformed."}
             confidence = 0.5

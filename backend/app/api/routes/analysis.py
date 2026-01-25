@@ -165,3 +165,67 @@ async def get_available_modes():
             }
         ]
     }
+
+
+@router.post("/{document_id}/rag", response_model=AnalysisResponse)
+async def analyze_document_with_rag(
+    document_id: str, 
+    request: AnalysisRequest,
+    focus_query: str = None
+):
+    """
+    RAG-Enhanced Analysis with multi-pass workflow and citations.
+    
+    This endpoint uses the new intelligence layer:
+    - Pass 1: Retrieve relevant chunks using hybrid search (semantic + keyword)
+    - Pass 2: Analyze with enriched context from VectorDB
+    - Pass 3: Generate findings with [Chunk X] citation markers
+    
+    Use this for higher quality analysis with evidence-based findings.
+    """
+    try:
+        doc_service = get_document_service()
+        doc = await doc_service.get_document(document_id)
+    except DocumentNotFoundError:
+        raise HTTPException(status_code=404, detail="Document not found")
+    
+    coordinator = get_coordinator()
+    
+    # Execute RAG-enhanced workflow
+    result = await coordinator.execute_rag_workflow(
+        mode=request.mode,
+        document_id=document_id,
+        content=doc["content"],
+        metadata={
+            "filename": doc["filename"],
+            "doc_type": doc["doc_type"],
+            "word_count": doc["word_count"]
+        },
+        focus_query=focus_query
+    )
+    
+    # Format agent results
+    agent_results = [
+        AgentResultSchema(
+            agent_name=r.agent_name,
+            role=r.role.value,
+            output=r.output,
+            confidence=r.confidence,
+            tokens_used=r.tokens_used,
+            execution_time_ms=r.execution_time_ms
+        )
+        for r in result.results.values()
+    ]
+    
+    return AnalysisResponse(
+        analysis_id=result.workflow_id,
+        document_id=document_id,
+        mode=result.mode,
+        status=AnalysisStatus.COMPLETED if result.success else AnalysisStatus.FAILED,
+        started_at=result.started_at,
+        completed_at=result.completed_at,
+        total_tokens=result.total_tokens,
+        total_time_ms=result.total_time_ms,
+        agents=agent_results,
+        final_output=result.final_output
+    )
