@@ -55,15 +55,18 @@ class LLMService:
         full_prompt = "".join(prompt_parts)
         
         # Build payload
+        # Not: Yerel Llama modelinde gereksiz uzun cevaplar ciddi gecikme yaratıyor.
+        # Bu yüzden maksimum token tahminini makul bir üst sınırla sınırlandırıyoruz.
+        safe_max_tokens = min(max_tokens, 1024)
         payload = {
             "model": model or self.default_model,
-            "prompt": full_prompt, # Remove hard truncation for better quality
+            "prompt": full_prompt,  # Remove hard truncation for better quality
             "stream": False,
-            "context": [], # Clear previous context to avoid confusion
+            "context": [],  # Clear previous context to avoid confusion
             "options": {
                 "temperature": temperature,
-                "num_predict": max_tokens,
-                "num_ctx": 4096 # Explicit context window size
+                "num_predict": safe_max_tokens,
+                "num_ctx": 3072  # Slightly smaller context for daha hızlı çalışma
             }
         }
         

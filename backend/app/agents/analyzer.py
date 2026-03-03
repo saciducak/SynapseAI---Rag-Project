@@ -24,19 +24,20 @@ class AnalyzerAgent(BaseAgent):
     
     @property
     def system_prompt(self) -> str:
-        return """You are an expert Document Analysis AI. Your goal is to extract high-quality, actionable intelligence from documents.
-        
+        return """You are an expert Document Analysis AI. Your goal is to extract high-quality, actionable intelligence from documents with clear evidence.
+
 IMPORTANT: You MUST respond with ONLY valid JSON.
 DO NOT use markdown formatting (like ```json), just output the raw JSON object.
 
-Your analysis must be evidence-based and specific. Avoid generic statements.
-If a field is not applicable, use null or empty list.
+Your analysis must be EVIDENCE-BASED: for every key finding, include a short direct quote or reference from the text.
+When "Retrieved Context" with [Chunk N] sections is provided, prefer citing those chunks (e.g. "evidence": "[Chunk 2] ...").
+Be specific and detailed; avoid generic statements. If a field is not applicable, use null or empty list.
 
 JSON OUTPUT STRUCTURE:
 {
     "document_type": "Specific type (e.g., Q3 Financial Report, Python Backend Source Code, SaaS Service Agreement)",
     "main_topics": ["Specific Topic 1", "Specific Topic 2"],
-    "summary_abstract": "A high-level executive summary (max 3 sentences)",
+    "summary_abstract": "A detailed 2-4 sentence executive summary that captures the main message, key decisions, and implications.",
     "key_entities": {
         "people": ["Full Name (Role)"],
         "organizations": ["Org Name"],
@@ -46,23 +47,23 @@ JSON OUTPUT STRUCTURE:
         "technical_terms": ["Term 1", "Term 2"]
     },
     "sentiment": {
-        "score": 0.8, // -1.0 to 1.0
+        "score": 0.8,
         "label": "positive/neutral/negative",
-        "reasoning": "Brief explanation"
+        "reasoning": "Brief explanation with a short quote if relevant"
     },
-    "complexity_score": 7, // 1-10 (1=Simple Memo, 10=Quantum Physics Paper)
+    "complexity_score": 7,
     "key_insights": [
         {
-            "insight": "The core finding or statement",
-            "evidence": "Quote or reference from text",
+            "insight": "The core finding or statement in one clear sentence",
+            "evidence": "Direct quote or [Chunk N] reference from the document",
             "importance": "high/medium/low"
         }
     ],
-    "structure": "Description of document organization",
+    "structure": "Description of document organization (sections, flow, key transitions)",
     "language": "English/Turkish/etc"
 }
 
-CRITICAL: Output ONLY valid JSON."""
+CRITICAL: Output ONLY valid JSON. Every key_insight must have an evidence field with a quote or chunk reference."""
     
     async def process(self, input_data: dict[str, Any]) -> AgentResult:
         """Analyze the document with optional RAG context."""
@@ -89,12 +90,12 @@ The following sections were identified as most relevant. Cite them using [Chunk 
 """
         
         citation_instruction = ""
-        if use_citations:
+        if use_citations and rag_context:
             citation_instruction = """
-IMPORTANT: For each key finding, include an "evidence" field with a direct quote AND a "source" field with the chunk number like "[Chunk 3]".
+IMPORTANT: Use the "Retrieved Context" sections above as your primary evidence. For each key_insight, set "evidence" to a direct quote from the text and include the chunk marker, e.g. "[Chunk 2] ...quote...". Be thorough and cite multiple chunks where relevant.
 """
         
-        prompt = f"""Analyze this document thoroughly:
+        prompt = f"""Analyze this document thoroughly and in detail:
         
 ## Metadata
 - Filename: {metadata.get('filename', 'Unknown')}

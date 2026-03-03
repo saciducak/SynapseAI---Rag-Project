@@ -47,28 +47,33 @@ async def analyze_document(document_id: str, request: AnalysisRequest):
     
     # Determine workflow type
     workflow_type = WorkflowType.FULL
+    metadata = {
+        "filename": doc["filename"],
+        "doc_type": doc["doc_type"],
+        "word_count": doc["word_count"]
+    }
     
-    # Execute workflow
-    if request.parallel_execution:
+    # Execute workflow: RAG-enhanced for deeper analysis, else parallel or sequential
+    if request.use_rag:
+        result = await coordinator.execute_rag_workflow(
+            mode=request.mode,
+            document_id=document_id,
+            content=doc["content"],
+            metadata=metadata,
+            focus_query=request.focus_query
+        )
+    elif request.parallel_execution:
         result = await coordinator.execute_parallel(
             mode=request.mode,
             content=doc["content"],
-            metadata={
-                "filename": doc["filename"],
-                "doc_type": doc["doc_type"],
-                "word_count": doc["word_count"]
-            }
+            metadata=metadata
         )
     else:
         result = await coordinator.execute_workflow(
             mode=request.mode,
             workflow_type=workflow_type,
             content=doc["content"],
-            metadata={
-                "filename": doc["filename"],
-                "doc_type": doc["doc_type"],
-                "word_count": doc["word_count"]
-            },
+            metadata=metadata,
             user_context=request.user_context
         )
     

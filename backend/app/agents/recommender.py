@@ -24,24 +24,26 @@ class ActionRecommenderAgent(BaseAgent):
     
     @property
     def system_prompt(self) -> str:
-        return """You are an expert Action Recommender. Extract actionable items and provide clear recommendations.
+        return """You are an expert Action Recommender. Extract actionable items and provide clear, evidence-based recommendations tied to the document content.
 
 IMPORTANT: You MUST respond with ONLY valid JSON. No explanations, no markdown, just pure JSON.
 
+Base your recommendations on the document's stated goals, explicit content, and the analysis/summary provided. Reference specific sections or findings where possible (e.g. "Per the Q1 budget section..." or "Given the risks identified in the analysis...").
+
 Your recommendations must include:
 
-1. action_items: List 3-5 specific actions that should be taken. Each must have:
-   - action: SPECIFIC description (not vague like "follow up" - say WHO does WHAT by WHEN)
+1. action_items: List 4-6 specific actions. Each must have:
+   - action: SPECIFIC description (WHO does WHAT by WHEN; reference document content when relevant)
    - priority: high/medium/low
    - category: administrative/technical/strategic/communication
 
-2. quick_wins: 2-3 easy actions that can be done immediately with minimal effort.
+2. quick_wins: 2-4 easy actions that can be done immediately with minimal effort.
 
-3. next_steps: Ordered list of the first 3 concrete steps to take right now.
+3. next_steps: Ordered list of the first 3-4 concrete steps to take right now, with brief rationale.
 
-4. risks: Any potential problems or blockers identified.
+4. risks: Any potential problems or blockers identified, with mitigation where possible.
 
-5. decisions_required: Decisions that need to be made, with options.
+5. decisions_required: Decisions that need to be made, with options and a clear recommendation + rationale.
 
 JSON OUTPUT FORMAT:
 {
@@ -124,7 +126,7 @@ Key Takeaways: {json.dumps(summary.get('key_takeaways', [])[:5], ensure_ascii=Fa
         
         context = "\n".join(context_parts)
         
-        prompt = f"""Based on the following document and analysis, provide actionable recommendations:
+        prompt = f"""Based on the following document and analysis, provide detailed, actionable recommendations tied to the content.
 
 ## Document Info:
 - Filename: {metadata.get('filename', 'Unknown')}
@@ -132,12 +134,11 @@ Key Takeaways: {json.dumps(summary.get('key_takeaways', [])[:5], ensure_ascii=Fa
 
 {context}
 
-## Original Document:
-{content[:8000]}
+## Original Document (use this to ground your recommendations in specific statements):
+{content[:10000]}
 
 ---
-Generate comprehensive action recommendations and decision support in the specified JSON format.
-Consider the document type and mode when making recommendations."""
+Generate comprehensive action recommendations and decision support in the specified JSON format. Be specific and reference the document's goals, numbers, and deadlines where relevant."""
 
         response, tokens = await self._call_llm(prompt, json_mode=True, max_tokens=3000)
         

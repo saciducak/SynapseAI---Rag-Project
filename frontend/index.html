@@ -482,16 +482,25 @@
 
             try {
                 const res = await fetch(`${API}/analysis/${docId}`, {
-                    method: 'POST', headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ mode })
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    // Paralel ajan çalıştırma ile toplam süreyi kısalt
+                    body: JSON.stringify({ mode, parallel_execution: true })
                 });
                 if (!res.ok) throw new Error("Analysis Failed");
                 const data = await res.json();
                 state.data[mode].result = data;
                 document.getElementById('loader').classList.add('hidden');
 
-                if (mode === 'code') renderCode(data);
-                else renderText(data, mode);
+                if (mode === 'code') {
+                    renderCode(data);
+                } else {
+                    renderText(data, mode);
+                }
+
+                // Sonuç kartını görünür yap (her ihtimale karşı)
+                const results = document.getElementById(mode === 'document' ? 'doc-results' : `${mode}-results`);
+                if (results) results.classList.remove('hidden');
                 updateViewUI(mode);
             } catch (e) {
                 document.getElementById('loader').classList.add('hidden');
@@ -503,18 +512,46 @@
         }
 
         function renderText(data, mode) {
-            const { analyzer, summarizer } = data.final_output;
-            const ragEnabled = data.final_output.rag_enabled || false;
-            const confidenceScore = data.confidence_score;
-            const citations = data.citations || [];
+            try {
+                // Safely unwrap final_output to avoid runtime errors if shape changes
+                const final = data && data.final_output ? data.final_output : {};
+                const analyzer = final.analyzer || {};
+                const summarizer = final.summarizer || {};
+                const recommender = final.recommender || {};
 
-            let text = "";
-            let target = "";
-            if (mode === 'document') { target = 'doc-summary'; text = summarizer.executive_summary; }
-            else if (mode === 'research') { target = 'research-summary'; text = summarizer.summary || analyzer.output; }
-            else { target = 'legal-summary'; text = summarizer.executive_summary || JSON.stringify(analyzer.output); }
+                // RAG ve kalite metrikleri yeni şemada üst seviyede geliyor
+                const ragEnabled = data.rag_enabled || final.rag_enabled || false;
+                const confidenceScore = typeof data.confidence_score === 'number' ? data.confidence_score : null;
+                const citations = data.citations || final.citations || [];
 
-            if (typeof text !== 'string') text = JSON.stringify(text, null, 2);
+                let text = "";
+                let target = "";
+                if (mode === 'document') {
+                    target = 'doc-summary';
+                    text = summarizer.executive_summary
+                        || summarizer.detailed_summary
+                        || summarizer.summary
+                        || (analyzer && (analyzer.summary || analyzer.summary_abstract || analyzer.raw || analyzer.output))
+                        || final.raw
+                        || '';
+                } else if (mode === 'research') {
+                    target = 'research-summary';
+                    text = summarizer.summary
+                        || summarizer.executive_summary
+                        || (analyzer && (analyzer.summary || analyzer.raw || analyzer.output))
+                        || final.raw
+                        || '';
+                } else {
+                    // legal
+                    target = 'legal-summary';
+                    text = summarizer.executive_summary
+                        || summarizer.summary
+                        || (analyzer && (analyzer.summary || analyzer.raw || analyzer.output))
+                        || final.raw
+                        || '';
+                }
+
+                if (typeof text !== 'string') text = JSON.stringify(text, null, 2);
 
             // Format citations as clickable links
             let formattedText = text.replace(/\n/g, '<br>');
@@ -525,29 +562,30 @@
             // Build output HTML with optional RAG badge
             let html = '';
 
-            if (ragEnabled || confidenceScore) {
-                html += `<div class="mb-4 flex items-center gap-3">`;
-                if (ragEnabled) {
+                if (ragEnabled || confidenceScore !== null) {
+                    html += `<div class="mb-4 flex items-center gap-3">`;
+                    if (ragEnabled) {
                     html += `<span class="inline-flex items-center gap-1.5 px-2.5 py-1 bg-accent-50 text-accent-700 rounded-full text-[11px] font-semibold">
                         <svg class="w-3 h-3" fill="currentColor" viewBox="0 0 20 20"><path d="M9.049 2.927c.3-.921 1.603-.921 1.902 0l1.07 3.292a1 1 0 00.95.69h3.462c.969 0 1.371 1.24.588 1.81l-2.8 2.034a1 1 0 00-.364 1.118l1.07 3.292c.3.921-.755 1.688-1.54 1.118l-2.8-2.034a1 1 0 00-1.175 0l-2.8 2.034c-.784.57-1.838-.197-1.539-1.118l1.07-3.292a1 1 0 00-.364-1.118L2.98 8.72c-.783-.57-.38-1.81.588-1.81h3.461a1 1 0 00.951-.69l1.07-3.292z"/></svg>
                         RAG Enhanced
                     </span>`;
                 }
-                if (confidenceScore) {
-                    const pct = Math.round(confidenceScore * 100);
-                    const color = pct >= 80 ? 'emerald' : pct >= 60 ? 'amber' : 'red';
-                    html += `<span class="inline-flex items-center gap-1 px-2 py-1 bg-${color}-50 text-${color}-700 rounded-full text-[11px] font-semibold">
-                        ${pct}% Confidence
-                    </span>`;
+                    if (confidenceScore !== null) {
+                        const pct = Math.round(confidenceScore * 100);
+                        const color = pct >= 80 ? 'emerald' : pct >= 60 ? 'amber' : 'red';
+                        html += `<span class="inline-flex items-center gap-1 px-2 py-1 bg-${color}-50 text-${color}-700 rounded-full text-[11px] font-semibold">
+                            ${pct}% Confidence
+                        </span>`;
+                    }
+                    html += `</div>`;
                 }
-                html += `</div>`;
-            }
 
-            html += `<div class="prose prose-sm max-w-none prose-zinc">${formattedText}</div>`;
+                // Ana özet bloğu
+                html += `<div class="prose prose-sm max-w-none prose-zinc">${formattedText}</div>`;
 
-            // Add key takeaways if available
-            if (summarizer.key_takeaways && summarizer.key_takeaways.length) {
-                html += `<div class="mt-6 p-4 bg-zinc-50 rounded-lg border border-zinc-100">
+                // Key takeaways
+                if (summarizer.key_takeaways && summarizer.key_takeaways.length) {
+                    html += `<div class="mt-6 p-4 bg-zinc-50 rounded-lg border border-zinc-100">
                     <h4 class="font-semibold text-zinc-800 text-sm mb-3 flex items-center gap-2">
                         <i data-lucide="lightbulb" class="w-4 h-4 text-accent-500"></i> Key Takeaways
                     </h4>
@@ -556,13 +594,48 @@
                             <span class="text-accent-500 mt-1">•</span>
                             <span>${typeof t === 'string' ? t : t.text || JSON.stringify(t)}</span>
                         </li>`).join('')}
-                    </ul>
-                </div>`;
-            }
+                        </ul>
+                    </div>`;
+                }
 
-            // Add citations panel if available
-            if (citations.length > 0) {
-                html += `<details class="mt-6 border border-zinc-200 rounded-lg overflow-hidden">
+                // Rekomendasyonlar
+                if (recommender.action_items && recommender.action_items.length) {
+                    html += `<div class="mt-6 p-4 bg-zinc-50 rounded-lg border border-zinc-100">
+                        <h4 class="font-semibold text-zinc-800 text-sm mb-3 flex items-center gap-2">
+                            <span class="text-green-500">🎯</span> Recommended Actions
+                        </h4>
+                        <ul class="space-y-2">
+                            ${recommender.action_items.map(i => `<li class="text-[13px] text-zinc-700 flex gap-2">
+                                <span class="uppercase text-[10px] font-semibold px-2 py-0.5 rounded-full ${
+                                    (i.priority || '').toLowerCase() === 'high'
+                                        ? 'bg-red-100 text-red-700'
+                                        : (i.priority || '').toLowerCase() === 'medium'
+                                        ? 'bg-amber-100 text-amber-700'
+                                        : 'bg-emerald-100 text-emerald-700'
+                                }">${(i.priority || 'normal')}</span>
+                                <span>${i.action || JSON.stringify(i)}</span>
+                            </li>`).join('')}
+                        </ul>
+                    </div>`;
+                }
+
+                // Quick wins
+                if (recommender.quick_wins && recommender.quick_wins.length) {
+                    html += `<div class="mt-4 p-3 bg-emerald-50 rounded-lg border border-emerald-100">
+                        <h4 class="font-semibold text-zinc-800 text-sm mb-2 flex items-center gap-2">
+                            <span class="text-emerald-500">⚡</span> Quick Wins
+                        </h4>
+                        <ul class="flex flex-wrap gap-2">
+                            ${recommender.quick_wins.map(w => `<li class="px-2.5 py-1 bg-white border border-emerald-100 rounded-full text-[12px] text-emerald-700">
+                                ${typeof w === 'string' ? w : w.action || JSON.stringify(w)}
+                            </li>`).join('')}
+                        </ul>
+                    </div>`;
+                }
+
+                // Add citations panel if available
+                if (citations.length > 0) {
+                    html += `<details class="mt-6 border border-zinc-200 rounded-lg overflow-hidden">
                     <summary class="px-4 py-3 bg-zinc-50 cursor-pointer text-sm font-medium text-zinc-700 hover:bg-zinc-100 transition">
                         📎 ${citations.length} Source Reference${citations.length > 1 ? 's' : ''}
                     </summary>
@@ -573,9 +646,26 @@
                         </div>`).join('')}
                     </div>
                 </details>`;
-            }
+                }
 
-            document.getElementById(target).innerHTML = html;
+                // Raw JSON debug panel (her zaman altta göster)
+                const rawJson = JSON.stringify(data, null, 2);
+                html += `<details class="mt-6 border border-dashed border-zinc-200 rounded-lg bg-zinc-50/60">
+                    <summary class="px-3 py-2 cursor-pointer text-[11px] font-mono text-zinc-500 uppercase tracking-wide">
+                        Raw analysis JSON
+                    </summary>
+                    <pre class="p-3 text-[11px] bg-white border-t border-zinc-200 overflow-auto max-h-72 rounded-b-lg"><code>${rawJson.replace(/</g, '&lt;')}</code></pre>
+                </details>`;
+
+                document.getElementById(target).innerHTML = html;
+            } catch (e) {
+                console.error('renderText error', e, data);
+                const target = mode === 'document' ? 'doc-summary'
+                    : mode === 'research' ? 'research-summary'
+                    : 'legal-summary';
+                document.getElementById(target).innerHTML =
+                    `<div class="text-[13px] text-red-600">Render error: ${e}</div>`;
+            }
             lucide.createIcons();
         }
 

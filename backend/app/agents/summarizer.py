@@ -24,32 +24,30 @@ class SummarizerAgent(BaseAgent):
     
     @property
     def system_prompt(self) -> str:
-        return """You are an expert Document Summarizer. Create comprehensive, multi-level summaries.
+        return """You are an expert Document Summarizer. Create comprehensive, multi-level summaries that are detailed and evidence-aware.
 
 IMPORTANT: You MUST respond with ONLY valid JSON. No explanations, no markdown, just pure JSON.
 
 Your summary must include ALL of these sections:
 
-1. executive_summary: 2-3 sentences that capture the essence. A busy executive should understand the document from this alone.
+1. executive_summary: 3-5 sentences that capture the essence, main decisions, and implications. When retrieved evidence with [Chunk N] is provided, weave in brief references (e.g. "as stated in [Chunk 2], ...") where it strengthens the summary.
 
-2. detailed_summary: 1-2 paragraphs with main points, context, and important details.
+2. detailed_summary: 2-3 paragraphs covering main points, context, evidence, and important details. Be thorough.
 
-3. key_takeaways: List 3-5 actionable items. Be SPECIFIC, not vague.
-   - Wrong: "Improve communication"
-   - Right: "Schedule weekly team sync meetings starting next Monday"
+3. key_takeaways: List 4-6 actionable items. Be SPECIFIC (who, what, when). Include a short rationale or source where helpful.
 
-4. critical_numbers: List ALL important numbers, statistics, metrics found.
+4. critical_numbers: List ALL important numbers, statistics, metrics found, with context.
 
-5. time_sensitive: Any deadlines, dates, or urgent items.
+5. time_sensitive: Any deadlines, dates, or urgent items with clear deadlines.
 
-6. highlights: 3-5 most notable or interesting points.
+6. highlights: 4-6 most notable or interesting points, with a brief quote or reference when it adds value.
 
 JSON OUTPUT FORMAT:
 {
-    "executive_summary": "Detailed 2-3 sentence overview capturing the main message and purpose of the document.",
-    "detailed_summary": "Comprehensive 1-2 paragraph summary covering all major points, decisions, and context.",
+    "executive_summary": "Detailed 3-5 sentence overview with main message, key decisions, and implications. Reference [Chunk N] when citing evidence.",
+    "detailed_summary": "Comprehensive 2-3 paragraph summary covering all major points, context, and important details.",
     "key_takeaways": [
-        "Specific actionable takeaway 1 with details",
+        "Specific actionable takeaway 1 with details and context",
         "Specific actionable takeaway 2 with context",
         "Specific actionable takeaway 3 explained clearly"
     ],
@@ -67,7 +65,7 @@ JSON OUTPUT FORMAT:
     ]
 }
 
-CRITICAL: Output ONLY JSON. Every field must be present. Be detailed and specific."""
+CRITICAL: Output ONLY JSON. Every field must be present. Be detailed, specific, and use evidence/citations when provided."""
     
     async def process(self, input_data: dict[str, Any]) -> AgentResult:
         """Generate multi-level summary."""
@@ -77,6 +75,8 @@ CRITICAL: Output ONLY JSON. Every field must be present. Be detailed and specifi
         metadata = input_data.get("metadata", {})
         analysis = input_data.get("analysis", {})
         mode = input_data.get("mode", "document")
+        rag_context = input_data.get("rag_context", "")
+        use_citations = input_data.get("use_citations", False)
         
         # Build context from prior analysis if available
         context = ""
@@ -89,19 +89,28 @@ CRITICAL: Output ONLY JSON. Every field must be present. Be detailed and specifi
 - Complexity: {analysis.get('complexity_score', 'Unknown')}/10
 """
         
-        prompt = f"""Create a comprehensive summary of this document:
+        rag_section = ""
+        if rag_context and use_citations:
+            rag_section = f"""
+## Retrieved Evidence (cite as [Chunk N] in your summary where relevant):
+{rag_context}
+---
+"""
+        
+        prompt = f"""Create a comprehensive, detailed summary of this document:
 
 ## Document Info:
 - Filename: {metadata.get('filename', 'Unknown')}
 - Word Count: {metadata.get('word_count', len(content.split()))}
 - Mode: {mode}
 {context}
+{rag_section}
 
 ## Document Content:
-{content[:12000]}
+{content[:14000]}
 
 ---
-Generate summaries at multiple levels as specified. Adapt your style based on the document type and mode."""
+Generate thorough, multi-level summaries as specified. When evidence sections are provided, reference [Chunk N] in executive_summary and detailed_summary where it supports your points. Be detailed and specific."""
 
         response, tokens = await self._call_llm(prompt, json_mode=True, max_tokens=2500)
         

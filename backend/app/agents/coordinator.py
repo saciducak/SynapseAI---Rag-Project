@@ -280,6 +280,7 @@ class MultiAgentCoordinator:
         results: dict[str, AgentResult] = {}
         errors: list[str] = []
         total_tokens = 0
+        rag_results: list = []
         
         agents = self._get_agents_for_mode(mode)
         vector_service = get_vector_service()
@@ -291,10 +292,10 @@ class MultiAgentCoordinator:
             # Build search query from content summary or focus query
             search_query = focus_query or self._extract_search_query(content)
             
-            # Retrieve relevant chunks with hybrid search
+            # Retrieve more chunks for deeper, evidence-backed analysis (12 instead of 8)
             rag_results = await vector_service.hybrid_search(
                 query=search_query,
-                n_results=8,
+                n_results=12,
                 document_id=document_id
             )
             
@@ -345,11 +346,19 @@ class MultiAgentCoordinator:
         completed_at = datetime.now()
         total_time = int((completed_at - started_at).total_seconds() * 1000)
         
-        # Compile output with RAG metadata
+        # Compile output with RAG metadata and citations for frontend
         final_output = self._compile_output(results, mode)
         final_output["rag_enabled"] = True
-        final_output["chunks_retrieved"] = len(rag_results) if 'rag_results' in dir() else 0
-        
+        final_output["chunks_retrieved"] = len(rag_results)
+        final_output["citations"] = [
+            {
+                "marker": f"[Chunk {r.get('chunk_index', i)}]",
+                "chunk_index": r.get("chunk_index", i),
+                "source_preview": (r.get("content") or "")[:200],
+            }
+            for i, r in enumerate(rag_results)
+        ]
+
         return CoordinationResult(
             workflow_id=workflow_id,
             mode=mode,
@@ -364,23 +373,37 @@ class MultiAgentCoordinator:
             errors=errors
         )
     
-    def _extract_search_query(self, content: str, max_length: int = 500) -> str:
-        """Extract key phrases from content for RAG search."""
-        # Take first paragraph and key sentences
-        lines = content.split('\n')
+    def _extract_search_query(self, content: str, max_length: int = 600) -> str:
+        """Extract key phrases from content for RAG search (beginning + middle + end for better coverage)."""
+        lines = [ln.strip() for ln in content.split('\n') if ln.strip()]
         query_parts = []
+        seen = set()
         
-        for line in lines[:10]:
-            line = line.strip()
-            if len(line) > 30:
-                query_parts.append(line[:200])
-                if len(' '.join(query_parts)) > max_length:
-                    break
+        # Beginning: first 15 substantial lines
+        for line in lines[:15]:
+            if len(line) > 25 and line not in seen:
+                seen.add(line)
+                query_parts.append(line[:220])
         
-        return ' '.join(query_parts)[:max_length]
+        # Middle: sample from center (for long docs)
+        if len(lines) > 30:
+            mid = len(lines) // 2
+            for line in lines[mid : mid + 5]:
+                if len(line) > 25 and line not in seen:
+                    seen.add(line)
+                    query_parts.append(line[:220])
+        
+        # End: last 5 substantial lines (conclusions, next steps)
+        for line in lines[-5:]:
+            if len(line) > 25 and line not in seen:
+                seen.add(line)
+                query_parts.append(line[:220])
+        
+        combined = ' '.join(query_parts)[:max_length]
+        return combined if combined else content[:500]
     
     def _format_rag_context(self, rag_results: list[dict]) -> str:
-        """Format RAG results into context string with citation markers."""
+        """Format RAG results into context string with citation markers (larger chunks for detail)."""
         if not rag_results:
             return "No relevant context retrieved."
         
@@ -388,9 +411,9 @@ class MultiAgentCoordinator:
         for i, result in enumerate(rag_results):
             chunk_idx = result.get("chunk_index", i)
             score = result.get("similarity_score", 0)
-            content = result.get("content", "")[:800]
+            # Allow up to 1000 chars per chunk for richer evidence
+            content = result.get("content", "")[:1000]
             
-            # Add citation marker
             context_parts.append(
                 f"[Chunk {chunk_idx}] (Relevance: {score:.2f})\n{content}\n"
             )

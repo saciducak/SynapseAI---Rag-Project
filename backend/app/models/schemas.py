@@ -32,6 +32,8 @@ class AnalysisRequest(BaseModel):
     mode: AnalysisMode = Field(default=AnalysisMode.DOCUMENT, description="Analysis mode")
     user_context: Optional[str] = Field(None, description="Additional context from user")
     parallel_execution: bool = Field(False, description="Run agents in parallel")
+    use_rag: bool = Field(True, description="Use RAG-enhanced workflow for deeper, citation-backed analysis")
+    focus_query: Optional[str] = Field(None, description="Optional query to focus RAG retrieval (e.g. 'risks and deadlines')")
 
 
 class SearchRequest(BaseModel):
