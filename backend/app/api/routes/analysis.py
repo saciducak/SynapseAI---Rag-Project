@@ -14,6 +14,7 @@ from app.models.schemas import (
 from app.services.document import get_document_service
 from app.agents.coordinator import get_coordinator, WorkflowType
 from app.core.exceptions import DocumentNotFoundError
+from app.utils.output_formatter import format_output
 
 router = APIRouter()
 
@@ -89,7 +90,12 @@ async def analyze_document(document_id: str, request: AnalysisRequest):
         )
         for r in result.results.values()
     ]
-    
+
+    # Premium formatting: confidence + citations + quality metrics
+    formatted = format_output(result.final_output)
+    rag_enabled = bool(result.final_output.get("rag_enabled", False))
+    citations = result.final_output.get("citations", formatted.citations) or formatted.citations
+
     return AnalysisResponse(
         analysis_id=result.workflow_id,
         document_id=document_id,
@@ -100,7 +106,11 @@ async def analyze_document(document_id: str, request: AnalysisRequest):
         total_tokens=result.total_tokens,
         total_time_ms=result.total_time_ms,
         agents=agent_results,
-        final_output=result.final_output
+        final_output=formatted.content,
+        rag_enabled=rag_enabled,
+        confidence_score=formatted.confidence_score,
+        citations=citations,
+        quality_metrics=formatted.quality_metrics
     )
 
 
@@ -221,7 +231,11 @@ async def analyze_document_with_rag(
         )
         for r in result.results.values()
     ]
-    
+
+    formatted = format_output(result.final_output)
+    rag_enabled = bool(result.final_output.get("rag_enabled", False))
+    citations = result.final_output.get("citations", formatted.citations) or formatted.citations
+
     return AnalysisResponse(
         analysis_id=result.workflow_id,
         document_id=document_id,
@@ -232,5 +246,9 @@ async def analyze_document_with_rag(
         total_tokens=result.total_tokens,
         total_time_ms=result.total_time_ms,
         agents=agent_results,
-        final_output=result.final_output
+        final_output=formatted.content,
+        rag_enabled=rag_enabled,
+        citations=citations,
+        confidence_score=formatted.confidence_score,
+        quality_metrics=formatted.quality_metrics
     )

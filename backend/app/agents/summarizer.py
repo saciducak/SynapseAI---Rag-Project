@@ -27,6 +27,8 @@ class SummarizerAgent(BaseAgent):
         return """You are an expert Document Summarizer. Create comprehensive, multi-level summaries that are detailed and evidence-aware.
 
 IMPORTANT: You MUST respond with ONLY valid JSON. No explanations, no markdown, just pure JSON.
+DO NOT invent numbers, dates, deadlines, budgets, or action items. If not explicitly present in the document/context, use empty lists for those fields.
+Avoid generic filler and repetitive sentences.
 
 Your summary must include ALL of these sections:
 
@@ -37,8 +39,10 @@ Your summary must include ALL of these sections:
 3. key_takeaways: List 4-6 actionable items. Be SPECIFIC (who, what, when). Include a short rationale or source where helpful.
 
 4. critical_numbers: List ALL important numbers, statistics, metrics found, with context.
+   - If there are no explicit numbers in the document, return [].
 
 5. time_sensitive: Any deadlines, dates, or urgent items with clear deadlines.
+   - If there are no explicit dates/deadlines, return [].
 
 6. highlights: 4-6 most notable or interesting points, with a brief quote or reference when it adds value.
 
@@ -118,8 +122,41 @@ Generate thorough, multi-level summaries as specified. When evidence sections ar
             summary = json.loads(response)
             confidence = 0.85
         except json.JSONDecodeError:
-            summary = {"raw_response": response, "parse_error": True}
-            confidence = 0.5
+            # One repair pass
+            repair_prompt = f"""The previous output was not valid JSON.\n\nReturn ONLY valid JSON matching the required schema. Do not add new keys.\nIf a field cannot be supported by the document/context, use empty list or empty string (never invent).\n\nInvalid output:\n{response}"""
+            repaired, repair_tokens = await self._call_llm(repair_prompt, json_mode=True, max_tokens=1200)
+            tokens += repair_tokens
+            try:
+                summary = json.loads(repaired)
+                confidence = 0.75
+            except json.JSONDecodeError:
+                summary = {"raw_response": response, "parse_error": True}
+                confidence = 0.5
+
+        required = {"executive_summary", "detailed_summary", "key_takeaways", "critical_numbers", "time_sensitive", "highlights"}
+        if isinstance(summary, dict) and not summary.get("parse_error"):
+            if not required.issubset(set(summary.keys())):
+                repair_prompt = f"""Return ONLY valid JSON with EXACTLY these keys:\n{sorted(required)}\n\nDo NOT invent numbers/dates; use empty lists if absent.\n\nPrevious JSON (wrong shape):\n{json.dumps(summary, ensure_ascii=False)}"""
+                repaired, repair_tokens = await self._call_llm(repair_prompt, json_mode=True, max_tokens=1200)
+                tokens += repair_tokens
+                try:
+                    summary2 = json.loads(repaired)
+                    if isinstance(summary2, dict) and required.issubset(set(summary2.keys())):
+                        summary = summary2
+                        confidence = min(confidence, 0.75)
+                except json.JSONDecodeError:
+                    pass
+            if not required.issubset(set(summary.keys())):
+                summary = {
+                    "executive_summary": "",
+                    "detailed_summary": "",
+                    "key_takeaways": [],
+                    "critical_numbers": [],
+                    "time_sensitive": [],
+                    "highlights": [],
+                    "_note": "Could not produce a schema-valid summary; returning empty fields."
+                }
+                confidence = 0.4
         
         return self._create_result(
             output=summary,

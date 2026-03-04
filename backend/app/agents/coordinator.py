@@ -289,8 +289,19 @@ class MultiAgentCoordinator:
             # === PASS 1: RAG Retrieval ===
             logger.info(f"[{workflow_id}] Pass 1: RAG Retrieval...")
             
-            # Build search query from content summary or focus query
-            search_query = focus_query or self._extract_search_query(content)
+            # Build search query from focus_query, mode anchors, and content sampling
+            anchors_by_mode = {
+                AnalysisMode.DOCUMENT: "decisions risks deadlines action items numbers budgets stakeholders",
+                AnalysisMode.CODE: "security vulnerabilities bugs error handling input validation secrets performance",
+                AnalysisMode.RESEARCH: "research question methodology dataset results limitations contributions",
+                AnalysisMode.LEGAL: "parties obligations term termination liability indemnification confidentiality governing law",
+            }
+            anchors = anchors_by_mode.get(mode, "")
+            sampled = self._extract_search_query(content)
+            search_query = (focus_query or f"{anchors} {metadata.get('filename','')}".strip()).strip()
+            # Ensure we still include some document-derived terms
+            if sampled:
+                search_query = f"{search_query} {sampled}".strip()
             
             # Retrieve more chunks for deeper, evidence-backed analysis (12 instead of 8)
             rag_results = await vector_service.hybrid_search(
@@ -355,6 +366,7 @@ class MultiAgentCoordinator:
                 "marker": f"[Chunk {r.get('chunk_index', i)}]",
                 "chunk_index": r.get("chunk_index", i),
                 "source_preview": (r.get("content") or "")[:200],
+                "similarity_score": r.get("similarity_score", None),
             }
             for i, r in enumerate(rag_results)
         ]

@@ -78,7 +78,7 @@ class DocumentInfo(BaseModel):
     doc_type: str
     word_count: int
     chunk_count: int
-    uploaded_at: datetime
+    uploaded_at: Optional[datetime] = None
     mode: Optional[AnalysisMode] = None
 
 

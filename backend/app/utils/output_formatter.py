@@ -73,20 +73,28 @@ class OutputFormatter:
         
         # Check for key fields
         if isinstance(output, dict):
-            # Analyzer output
-            if output.get("main_topics"):
+            # Analyzer output (nested under "analyzer" in our pipeline)
+            analyzer = output.get("analyzer") if isinstance(output.get("analyzer"), dict) else output
+            summarizer = output.get("summarizer") if isinstance(output.get("summarizer"), dict) else output
+            recommender = output.get("recommender") if isinstance(output.get("recommender"), dict) else output
+
+            if analyzer.get("main_topics"):
                 score += 0.1
-            if output.get("entities"):
+            if analyzer.get("key_entities") or analyzer.get("entities"):
                 score += 0.1
-            if output.get("key_points"):
+            if analyzer.get("key_insights") or analyzer.get("key_points"):
                 score += 0.1
-            if output.get("complexity_score"):
+            if analyzer.get("complexity_score"):
                 score += 0.05
             
             # Summarizer output
-            if output.get("executive_summary"):
+            if summarizer.get("executive_summary"):
                 score += 0.1
-            if output.get("key_takeaways"):
+            if summarizer.get("key_takeaways"):
+                score += 0.05
+
+            # Recommender output
+            if recommender.get("action_items"):
                 score += 0.05
             
             # Evidence presence boosts confidence
@@ -192,6 +200,31 @@ class OutputFormatter:
         """
         if not isinstance(output, dict):
             return {"raw": output}
+
+        # Normalize common list fields that models sometimes return as null
+        list_fields = {
+            "main_topics", "key_insights",
+            "key_takeaways", "critical_numbers", "time_sensitive", "highlights",
+            "action_items", "quick_wins", "next_steps", "risks", "decisions_required",
+            "bugs", "security_issues", "refactoring_suggestions",
+            "authors", "key_findings", "limitations",
+            "parties", "obligations", "compliance_flags", "red_lines",
+        }
+
+        def normalize(obj):
+            if isinstance(obj, dict):
+                out = {}
+                for k, v in obj.items():
+                    if k in list_fields and v is None:
+                        out[k] = []
+                    else:
+                        out[k] = normalize(v)
+                return out
+            if isinstance(obj, list):
+                return [normalize(x) for x in obj]
+            return obj
+
+        output = normalize(output)
         
         formatted = {}
         

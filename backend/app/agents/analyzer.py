@@ -6,6 +6,7 @@ import time
 from typing import Any
 
 from app.agents.base import BaseAgent, AgentRole, AgentResult
+from loguru import logger
 
 
 class AnalyzerAgent(BaseAgent):
@@ -32,6 +33,8 @@ DO NOT use markdown formatting (like ```json), just output the raw JSON object.
 Your analysis must be EVIDENCE-BASED: for every key finding, include a short direct quote or reference from the text.
 When "Retrieved Context" with [Chunk N] sections is provided, prefer citing those chunks (e.g. "evidence": "[Chunk 2] ...").
 Be specific and detailed; avoid generic statements. If a field is not applicable, use null or empty list.
+Do NOT invent facts, dates, numbers, obligations, risks, or entities. If not explicitly present, leave the relevant fields empty.
+Avoid repetitive phrasing; each key_insight should be distinct.
 
 JSON OUTPUT STRUCTURE:
 {
@@ -115,9 +118,33 @@ Perform a deep spectrum analysis and output the requested JSON."""
             analysis = json.loads(response)
             confidence = 0.95
         except json.JSONDecodeError:
-            logger.warning("JSON Decode Error in Analyzer")
-            analysis = {"raw_response": response, "parse_error": True, "summary": "Analysis completed but JSON was malformed."}
-            confidence = 0.5
+            logger.warning("JSON Decode Error in Analyzer; attempting one repair pass")
+            # One repair pass using the same schema constraints
+            repair_prompt = f"""The previous output was not valid JSON.\n\nReturn ONLY valid JSON matching the required schema. Do not add new keys.\nIf you cannot fill a field from the document, use null/empty list.\n\nInvalid output:\n{response}"""
+            repaired, repair_tokens = await self._call_llm(repair_prompt, json_mode=True, max_tokens=1200)
+            tokens += repair_tokens
+            try:
+                analysis = json.loads(repaired)
+                confidence = 0.85
+            except json.JSONDecodeError:
+                analysis = {"raw_response": response, "parse_error": True, "summary": "Analysis completed but JSON was malformed."}
+                confidence = 0.5
+
+        # Schema sanity check (reduce "valid JSON but wrong shape")
+        required = {"document_type", "main_topics", "summary_abstract", "key_entities", "sentiment", "complexity_score", "key_insights", "structure", "language"}
+        if isinstance(analysis, dict) and not analysis.get("parse_error"):
+            if not required.issubset(set(analysis.keys())):
+                logger.warning("Analyzer schema mismatch; attempting one schema repair pass")
+                schema_repair = f"""Return ONLY valid JSON with EXACTLY the required keys:\n{sorted(required)}\n\nDo NOT invent facts; if unknown use null/empty list.\n\nPrevious JSON (wrong shape):\n{json.dumps(analysis, ensure_ascii=False)}"""
+                repaired, repair_tokens = await self._call_llm(schema_repair, json_mode=True, max_tokens=1200)
+                tokens += repair_tokens
+                try:
+                    analysis2 = json.loads(repaired)
+                    if isinstance(analysis2, dict) and required.issubset(set(analysis2.keys())):
+                        analysis = analysis2
+                        confidence = min(confidence, 0.85)
+                except json.JSONDecodeError:
+                    pass
         
         return self._create_result(
             output=analysis,
@@ -191,6 +218,10 @@ JSON OUTPUT STRUCTURE:
         
         content = input_data.get("content", "")
         metadata = input_data.get("metadata", {})
+
+        # Add stable line numbers to reduce hallucinated locations
+        lines = content.splitlines()
+        numbered = "\n".join([f"L{idx+1:04d}: {ln}" for idx, ln in enumerate(lines[:2000])])
         
         # 30k context for code is crucial
         prompt = f"""Review the following code file:
@@ -201,10 +232,11 @@ JSON OUTPUT STRUCTURE:
 
 ## Code Content:
 ```
-{content[:30000]}
+{numbered[:30000]}
 ```
 
-Provide a strict, senior-level architectural review in JSON."""
+Provide a strict, senior-level architectural review in JSON.
+CRITICAL: When reporting issues, use the provided L#### line numbers. If you are not sure, omit the line (use null)."""
 
         response, tokens = await self._call_llm(prompt, json_mode=True, max_tokens=3000)
         
@@ -212,8 +244,30 @@ Provide a strict, senior-level architectural review in JSON."""
             analysis = json.loads(response)
             confidence = 0.9
         except json.JSONDecodeError:
-            analysis = {"raw_response": response, "parse_error": True}
-            confidence = 0.5
+            logger.warning("JSON Decode Error in CodeAnalyzer; attempting one repair pass")
+            repair_prompt = f"""The previous output was not valid JSON.\n\nReturn ONLY valid JSON matching the required schema.\n- Use L#### line numbers from the input.\n- Do NOT invent vulnerabilities; if unsure, omit.\n\nInvalid output:\n{response}"""
+            repaired, repair_tokens = await self._call_llm(repair_prompt, json_mode=True, max_tokens=1500)
+            tokens += repair_tokens
+            try:
+                analysis = json.loads(repaired)
+                confidence = 0.8
+            except json.JSONDecodeError:
+                analysis = {"raw_response": response, "parse_error": True}
+                confidence = 0.5
+
+        required = {"language", "quality_score", "summary", "architecture_analysis", "bugs", "security_issues", "refactoring_suggestions", "complexity"}
+        if isinstance(analysis, dict) and not analysis.get("parse_error"):
+            if not required.issubset(set(analysis.keys())):
+                repair_prompt = f"""Return ONLY valid JSON with EXACTLY these keys:\n{sorted(required)}\n\nRules:\n- Use L#### line numbers from input, or null.\n- Do NOT invent vulnerabilities.\n\nPrevious JSON (wrong shape):\n{json.dumps(analysis, ensure_ascii=False)}"""
+                repaired, repair_tokens = await self._call_llm(repair_prompt, json_mode=True, max_tokens=1500)
+                tokens += repair_tokens
+                try:
+                    analysis2 = json.loads(repaired)
+                    if isinstance(analysis2, dict) and required.issubset(set(analysis2.keys())):
+                        analysis = analysis2
+                        confidence = min(confidence, 0.8)
+                except json.JSONDecodeError:
+                    pass
         
         return self._create_result(output=analysis, tokens=tokens, start_time=start_time, confidence=confidence)
 
@@ -236,6 +290,8 @@ class ResearchAnalyzerAgent(BaseAgent):
         return """You are a Distinguished Academic Reviewer. Analyze the research paper for scientific validity and novelty.
 
 IMPORTANT: You MUST respond with ONLY valid JSON.
+DO NOT invent authors, datasets, metrics, or results. If not explicitly present, use null/empty list.
+When retrieved context with [Chunk N] is provided, cite it in free-text fields (e.g. "According to [Chunk 3]...").
 
 JSON OUTPUT STRUCTURE:
 {
@@ -261,8 +317,20 @@ JSON OUTPUT STRUCTURE:
         start_time = time.time()
         content = input_data.get("content", "")[:30000] # Increased context
         metadata = input_data.get("metadata", {})
+        rag_context = input_data.get("rag_context", "")
+        use_citations = input_data.get("use_citations", False)
+
+        rag_section = ""
+        if rag_context and use_citations:
+            rag_section = f"""
+## Retrieved Evidence (cite as [Chunk N]):
+{rag_context}
+---
+"""
         
         prompt = f"""Analyze research paper: {metadata.get('filename', 'unknown')}
+
+{rag_section}
         
 {content}
         
@@ -273,8 +341,44 @@ Extract academic insights in strict JSON."""
             analysis = json.loads(response)
             confidence = 0.9
         except json.JSONDecodeError:
-            analysis = {"raw_response": response, "parse_error": True}
-            confidence = 0.5
+            repair_prompt = f"""The previous output was not valid JSON.\n\nReturn ONLY valid JSON matching the required schema. Do not add new keys.\nIf unsupported by the paper/context, use null/empty.\n\nInvalid output:\n{response}"""
+            repaired, repair_tokens = await self._call_llm(repair_prompt, json_mode=True, max_tokens=1200)
+            tokens += repair_tokens
+            try:
+                analysis = json.loads(repaired)
+                confidence = 0.75
+            except json.JSONDecodeError:
+                analysis = {"raw_response": response, "parse_error": True}
+                confidence = 0.5
+
+        required = {"title", "authors", "research_question", "methodology", "key_findings", "novelty_score", "limitations", "implications", "future_work"}
+        if isinstance(analysis, dict) and not analysis.get("parse_error"):
+            if not required.issubset(set(analysis.keys())):
+                repair_prompt = f"""Return ONLY valid JSON with EXACTLY these keys:\n{sorted(required)}\n\nDo NOT invent missing info. Use null/empty lists.\n\nPrevious JSON (wrong shape):\n{json.dumps(analysis, ensure_ascii=False)}"""
+                repaired, repair_tokens = await self._call_llm(repair_prompt, json_mode=True, max_tokens=1500)
+                tokens += repair_tokens
+                try:
+                    analysis2 = json.loads(repaired)
+                    if isinstance(analysis2, dict) and required.issubset(set(analysis2.keys())):
+                        analysis = analysis2
+                        confidence = min(confidence, 0.8)
+                except json.JSONDecodeError:
+                    pass
+            # Hard fallback if still wrong shape
+            if not required.issubset(set(analysis.keys())):
+                analysis = {
+                    "title": None,
+                    "authors": [],
+                    "research_question": None,
+                    "methodology": {"type": None, "description": None, "sample_size": None},
+                    "key_findings": [],
+                    "novelty_score": 0,
+                    "limitations": [],
+                    "implications": None,
+                    "future_work": None,
+                    "_note": "Could not extract a research-paper structure from the document; returning empty fields."
+                }
+                confidence = 0.4
         return self._create_result(output=analysis, tokens=tokens, start_time=start_time, confidence=confidence)
 
 
@@ -296,6 +400,8 @@ class LegalAnalyzerAgent(BaseAgent):
         return """You are a Senior Legal Counsel. Analyze the document for risk, compliance, and binding obligations.
 
 IMPORTANT: You MUST respond with ONLY valid JSON.
+DO NOT invent clauses, parties, dates, or obligations. If not explicitly present, use null/empty list.
+When retrieved context with [Chunk N] is provided, cite it in descriptive fields where it supports your claims (e.g. \"[Chunk 5] Termination...\"), and prefer using clause text from the retrieved chunks.
 
 JSON OUTPUT STRUCTURE:
 {
@@ -318,8 +424,20 @@ JSON OUTPUT STRUCTURE:
     async def process(self, input_data: dict[str, Any]) -> AgentResult:
         start_time = time.time()
         content = input_data.get("content", "")[:30000] # Increased context
+        rag_context = input_data.get("rag_context", "")
+        use_citations = input_data.get("use_citations", False)
+
+        rag_section = ""
+        if rag_context and use_citations:
+            rag_section = f"""
+## Retrieved Evidence (cite as [Chunk N] in clause/risk descriptions):
+{rag_context}
+---
+"""
         
         prompt = f"""Legal analysis required for:
+
+{rag_section}
         
 {content}
         
@@ -331,6 +449,43 @@ Output strict JSON legal assessment."""
             analysis["_disclaimer"] = "AI Analysis - Does not constitute legal advice."
             confidence = 0.9
         except json.JSONDecodeError:
-            analysis = {"raw_response": response, "parse_error": True}
-            confidence = 0.5
+            repair_prompt = f"""The previous output was not valid JSON.\n\nReturn ONLY valid JSON matching the required schema. Do not add new keys.\nDo NOT invent legal terms; if unsupported, use null/empty.\n\nInvalid output:\n{response}"""
+            repaired, repair_tokens = await self._call_llm(repair_prompt, json_mode=True, max_tokens=1500)
+            tokens += repair_tokens
+            try:
+                analysis = json.loads(repaired)
+                analysis["_disclaimer"] = "AI Analysis - Does not constitute legal advice."
+                confidence = 0.75
+            except json.JSONDecodeError:
+                analysis = {"raw_response": response, "parse_error": True}
+                confidence = 0.5
+
+        required = {"document_type", "parties", "term_dates", "obligations", "risk_assessment", "compliance_flags", "red_lines"}
+        if isinstance(analysis, dict) and not analysis.get("parse_error"):
+            if not required.issubset(set(analysis.keys())):
+                repair_prompt = f"""Return ONLY valid JSON with EXACTLY these keys:\n{sorted(required)}\n\nRules:\n- Do NOT invent parties/clauses/dates.\n- If this is not a legal agreement, set document_type to something like \"not_a_contract\" and keep parties/obligations empty.\n\nPrevious JSON (wrong shape):\n{json.dumps(analysis, ensure_ascii=False)}"""
+                repaired, repair_tokens = await self._call_llm(repair_prompt, json_mode=True, max_tokens=1800)
+                tokens += repair_tokens
+                try:
+                    analysis2 = json.loads(repaired)
+                    if isinstance(analysis2, dict) and required.issubset(set(analysis2.keys())):
+                        analysis = analysis2
+                        analysis["_disclaimer"] = "AI Analysis - Does not constitute legal advice."
+                        confidence = min(confidence, 0.8)
+                except json.JSONDecodeError:
+                    pass
+            # Hard fallback if still wrong shape
+            if not required.issubset(set(analysis.keys())):
+                analysis = {
+                    "document_type": "not_a_contract",
+                    "parties": [],
+                    "term_dates": {"effective": None, "expiration": None, "renewal": None},
+                    "obligations": [],
+                    "risk_assessment": {"score": "Low", "critical_risks": []},
+                    "compliance_flags": [],
+                    "red_lines": [],
+                    "_note": "The document does not appear to contain a recognizable legal agreement structure; returning empty fields."
+                }
+                analysis["_disclaimer"] = "AI Analysis - Does not constitute legal advice."
+                confidence = 0.4
         return self._create_result(output=analysis, tokens=tokens, start_time=start_time, confidence=confidence)

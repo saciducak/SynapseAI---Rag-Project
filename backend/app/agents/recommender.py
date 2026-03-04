@@ -29,6 +29,8 @@ class ActionRecommenderAgent(BaseAgent):
 IMPORTANT: You MUST respond with ONLY valid JSON. No explanations, no markdown, just pure JSON.
 
 Base your recommendations on the document's stated goals, explicit content, and the analysis/summary provided. Reference specific sections or findings where possible (e.g. "Per the Q1 budget section..." or "Given the risks identified in the analysis...").
+DO NOT invent deadlines, numbers, or obligations. If the document does not specify them, do not fabricate. Prefer fewer, higher-quality items over generic ones.
+Avoid repetitive wording across items.
 
 Your recommendations must include:
 
@@ -98,6 +100,8 @@ CRITICAL: Output ONLY JSON. Be SPECIFIC and ACTIONABLE. No vague recommendations
         summary = input_data.get("summary", {})
         user_context = input_data.get("user_context", "")
         mode = input_data.get("mode", "document")
+        rag_context = input_data.get("rag_context", "")
+        use_citations = input_data.get("use_citations", False)
         
         # Build context
         context_parts = []
@@ -123,6 +127,12 @@ Key Takeaways: {json.dumps(summary.get('key_takeaways', [])[:5], ensure_ascii=Fa
 ## User Context:
 {user_context}
 """)
+
+        if rag_context and use_citations:
+            context_parts.append(f"""
+## Retrieved Evidence (cite as [Chunk N] if you reference it):
+{rag_context}
+""")
         
         context = "\n".join(context_parts)
         
@@ -146,8 +156,39 @@ Generate comprehensive action recommendations and decision support in the specif
             recommendations = json.loads(response)
             confidence = 0.8
         except json.JSONDecodeError:
-            recommendations = {"raw_response": response, "parse_error": True}
-            confidence = 0.5
+            repair_prompt = f"""The previous output was not valid JSON.\n\nReturn ONLY valid JSON matching the required schema. Do not add new keys.\nRules:\n- Do NOT invent dates/numbers/deadlines.\n- If unsupported, use empty lists.\n\nInvalid output:\n{response}"""
+            repaired, repair_tokens = await self._call_llm(repair_prompt, json_mode=True, max_tokens=1500)
+            tokens += repair_tokens
+            try:
+                recommendations = json.loads(repaired)
+                confidence = 0.7
+            except json.JSONDecodeError:
+                recommendations = {"raw_response": response, "parse_error": True}
+                confidence = 0.5
+
+        required = {"action_items", "quick_wins", "next_steps", "risks", "decisions_required"}
+        if isinstance(recommendations, dict) and not recommendations.get("parse_error"):
+            if not required.issubset(set(recommendations.keys())):
+                repair_prompt = f"""Return ONLY valid JSON with EXACTLY these keys:\n{sorted(required)}\n\nDo NOT invent dates/numbers/deadlines. Use empty lists if unsupported.\n\nPrevious JSON (wrong shape):\n{json.dumps(recommendations, ensure_ascii=False)}"""
+                repaired, repair_tokens = await self._call_llm(repair_prompt, json_mode=True, max_tokens=1500)
+                tokens += repair_tokens
+                try:
+                    rec2 = json.loads(repaired)
+                    if isinstance(rec2, dict) and required.issubset(set(rec2.keys())):
+                        recommendations = rec2
+                        confidence = min(confidence, 0.7)
+                except json.JSONDecodeError:
+                    pass
+            if not required.issubset(set(recommendations.keys())):
+                recommendations = {
+                    "action_items": [],
+                    "quick_wins": [],
+                    "next_steps": [],
+                    "risks": [],
+                    "decisions_required": [],
+                    "_note": "Could not produce schema-valid recommendations; returning empty fields."
+                }
+                confidence = 0.4
         
         return self._create_result(
             output=recommendations,
