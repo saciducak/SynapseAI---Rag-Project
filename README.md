@@ -4,6 +4,8 @@
 
 A sophisticated AI-powered document analysis platform that uses multiple specialized agents to extract insights, generate summaries, and provide actionable recommendations from any document type.
 
+**Recent highlights:** RAG-enhanced analysis (default) with citation-backed outputs; schema-valid JSON with automatic repair and anti-hallucination rules; confidence scores and quality metrics in API responses; code review with stable line-number references; AI Chat over uploaded documents.
+
 ---
 
 ## 📊 System Architecture
@@ -60,7 +62,7 @@ flowchart TB
 
 ---
 
-## � Analysis Pipeline
+## 📋 Analysis Pipeline
 
 ```mermaid
 sequenceDiagram
@@ -132,8 +134,9 @@ synapse-ai/
 │   │   ├── 📁 api/
 │   │   │   └── 📁 routes/       # REST API endpoints
 │   │   │       ├── documents.py # Upload/manage documents
-│   │   │       ├── analysis.py  # Run analysis workflows
-│   │   │       └── search.py    # Semantic search & RAG
+│   │   │       ├── analysis.py  # Run analysis workflows (incl. RAG)
+│   │   │       ├── search.py    # Semantic search & RAG
+│   │   │       └── chat.py      # Document Q&A (RAG chat)
 │   │   ├── 📁 services/
 │   │   │   ├── llm.py           # Ollama LLM wrapper
 │   │   │   ├── vector.py        # ChromaDB vector store
@@ -143,7 +146,8 @@ synapse-ai/
 │   │   │   └── exceptions.py    # Custom exceptions
 │   │   ├── 📁 utils/
 │   │   │   ├── parser.py        # Multi-format file parser
-│   │   │   └── chunker.py       # Semantic text chunking
+│   │   │   ├── chunker.py       # Semantic text chunking
+│   │   │   └── output_formatter.py  # Confidence, citations, quality metrics
 │   │   └── main.py              # FastAPI application
 │   ├── requirements.txt
 │   └── .env
@@ -251,9 +255,10 @@ Navigate to `http://localhost:3000`
 | `GET` | `/health` | System health check |
 | `POST` | `/api/documents/upload` | Upload document |
 | `GET` | `/api/documents/{id}` | Get document details |
-| `POST` | `/api/analysis/{id}` | Run multi-agent analysis |
+| `POST` | `/api/analysis/{id}` | Run multi-agent analysis (RAG by default) |
 | `POST` | `/api/search/semantic` | Semantic document search |
 | `POST` | `/api/search/ask` | RAG-based Q&A |
+| `POST` | `/api/chat/ask` | Chat with a specific document (RAG) |
 
 ---
 
@@ -267,12 +272,13 @@ The interface has been radically redesigned for a premium SaaS experience:
 
 ---
 
-## 🚀 Performance Optimizations
+## 🚀 Performance & Quality
 
-1. **Async Engine**: Backend completely refactored to use `httpx.AsyncClient` for non-blocking LLM/Embedding calls.
-2. **Batch Embeddings**: Parallel processing of document chunks (10x faster ingestion).
-3. **Smart RAG**: Sentence-boundary aware chunking to prevent semantic fragmentation.
-4. **Enhanced Agents**: Optimized system prompts for 100% structured JSON reliability.
+1. **Async Engine**: Backend uses `httpx.AsyncClient` for non-blocking LLM/Embedding calls.
+2. **Batch Embeddings**: Parallel processing of document chunks for faster ingestion.
+3. **Smart RAG**: Sentence-boundary aware chunking; mode-specific retrieval (document/code/research/legal); 12 chunks with citation markers in outputs.
+4. **Schema-Valid Outputs**: Agents return strict JSON; automatic repair on parse/shape errors; safe fallbacks so the UI always receives a consistent structure.
+5. **Evidence-Based Analysis**: Anti-hallucination rules (no invented numbers/dates); citations (`[Chunk N]`) and confidence scores in API responses; code review uses line-numbered prompts for stable references.
 
 ## 📄 License
 
@@ -282,7 +288,7 @@ MIT License - Free for personal and commercial use.
 
 ## 🛣️ Roadmap
 
-- [ ] **v1.1**: Enhanced code review with line-level suggestions
+- [x] **v1.1**: Enhanced code review with line-level suggestions
 - [ ] **v1.2**: Multi-document comparative analysis
 - [ ] **v1.3**: Export to PDF/Markdown
 - [ ] **v2.0**: Real-time collaborative analysis
